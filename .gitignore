@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+
+# Logs
+*.log
+inews_monitor.log
+
+# Descargas y estado
+Descargas/
+content_state.json
+tweet_api.json
+urlEjemplo.txt
+
+# Configuración con secretos
+config.json
+ScriptsTwitter/config.json
+
+# IDE
+.vscode/
+.idea/

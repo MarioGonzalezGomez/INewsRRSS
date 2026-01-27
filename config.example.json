@@ -1,0 +1,25 @@
+{
+    "inews": {
+        "host": "127.0.0.1",
+        "user": "user",
+        "password": "password",
+        "rundown_path": "RUNDOWNS/SHOW"
+    },
+    "monitor": {
+        "interval_seconds": 30,
+        "ap_filter": "",
+        "tipos_rotulo_validos": [
+            "X_Total",
+            "X_Faldon",
+            "Faldon"
+        ]
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "inews_monitor.log"
+    },
+    "content": {
+        "download_base_path": "C:\\Ruta\\A\\Descargas",
+        "scripts_twitter_path": "scripts/twitter"
+    }
+}
