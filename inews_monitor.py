@@ -580,6 +580,30 @@ class ContentManager:
                 
                 del self.state[url]
                 self._save_state()
+        
+        # Siempre actualizar el índice maestro al final de la sincronización
+        self._update_index()
+
+    def _update_index(self):
+        """Genera/Actualiza el archivo index.json con el mapeo URL -> Ruta Local JSON."""
+        index_file = os.path.join(self.download_base, "index.json")
+        index_data = {}
+        
+        for url, tweet_id in self.state.items():
+            # Construir ruta absoluta al tweet_api.json
+            json_path = os.path.join(self.download_base, tweet_id, "tweet_api.json")
+            abs_json_path = os.path.abspath(json_path)
+            
+            # Verificar si existe para no meter basura (opcional, pero recomendable)
+            if os.path.exists(json_path):
+                index_data[url] = abs_json_path
+        
+        try:
+            with open(index_file, "w", encoding="utf-8") as f:
+                json.dump(index_data, f, indent=4, ensure_ascii=False)
+            self.logger.info(f"Índice maestro actualizado: {index_file}")
+        except Exception as e:
+            self.logger.error(f"Error actualizando índice maestro: {e}")
 
 
 class INewsMonitor:
