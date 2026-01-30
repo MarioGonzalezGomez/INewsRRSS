@@ -24,10 +24,23 @@ Servicio automatizado para monitorear rundowns de iNews y descargar contenido mu
 1. Renombrar `config.example.json` a `config.json` y editar credenciales.
 2. Configurar el `.env` en `ScriptsTwitter` con `TWITTER_BEARER_TOKEN`.
 
+## Instalación Inicial
+
+**Primera vez o después de mover el proyecto a otro equipo:**
+
+1. Abre `cmd` o PowerShell en la carpeta del proyecto
+2. Ejecuta:
+   ```cmd
+   setup_env.bat
+   ```
+   Esto creará el entorno virtual e instalará todas las dependencias automáticamente.
+
 ## Uso
 
-Ejecutar `run_monitor.bat` para iniciar el servicio.
+Ejecutar `run_monitor.bat` para iniciar el servicio:
 
 ```cmd
 run_monitor.bat
 ```
+
+**Nota:** `run_monitor.bat` ahora es portátil y funcionará aunque el entorno virtual no exista - creará uno automáticamente si es necesario.

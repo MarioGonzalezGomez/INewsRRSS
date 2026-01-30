@@ -20,6 +20,7 @@ import time
 import re
 import os
 import sys
+import csv
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from io import StringIO
@@ -207,47 +208,69 @@ class StoryParser:
         """
         Parsea un rótulo desde el contenido de una etiqueta <ap>.
         
-        Ejemplo de entrada: CAMIO ]] 1 YNNAM 0 [[ [CG1] Faldon | 00013523: |Faldon de AQLT(In  Dur
+        Soporta múltiples formatos:
+        1. Con [canal]: [A1-A2-A3] 10 QR -- 00010829: |contenido|
+        2. Sin canal: Faldon | 00013523: |contenido(
+        3. Antiguo: [CG1] Faldon | 00013523: |contenido(
         
         Extrae:
-        - Canal: CG1 (entre corchetes [XXX])
-        - Tipo: Faldon (primera palabra después del canal)
-        - Contenido: Faldon de AQLT (después de : |, hasta el paréntesis)
+        - Canal: Entre corchetes [XXX] o vacío
+        - Tipo: Palabra que identifica el tipo de rótulo
+        - Contenido: Texto entre el primer | y ( o siguiente |
         """
         if not ap_content or not ap_content.strip():
             return None
         
         try:
-            # Buscar el canal entre corchetes [XXX] - solo letras y números
-            canal_match = re.search(r'\[([A-Z0-9]+)\]', ap_content)
-            if not canal_match:
-                return None
+            # Buscar canal entre corchetes [XXX]
+            canal_match = re.search(r'\[([A-Za-z0-9\-]+)\]', ap_content)
+            canal = canal_match.group(1).strip() if canal_match else ""
             
-            canal = canal_match.group(1).strip()
+            # Si hay canal, obtener el texto después de él
+            if canal_match:
+                after_canal = ap_content[canal_match.end():].strip()
+            else:
+                after_canal = ap_content.strip()
             
-            # Obtener el texto después del canal
-            after_canal_index = canal_match.end()
-            after_canal = ap_content[after_canal_index:].strip()
+            # El tipo es una palabra que sigue patrones:
+            # - Después de números/códigos: "QR", "Titulo", "Tema", etc.
+            # - O la primera palabra: "Faldon", "Titular", etc.
+            tipo = ""
             
-            # El tipo es la primera palabra después del canal hasta el pipe |
-            pipe_index = after_canal.find('|')
-            tipo_section = after_canal[:pipe_index].strip() if pipe_index > 0 else after_canal
-            tipo_parts = tipo_section.split()
-            tipo = tipo_parts[0].strip() if tipo_parts else ""
+            # Intentar extraer tipo después de patrón "NN -- " (código)
+            tipo_match = re.search(r'--\s+\d+:\s+([A-Za-z_0-9]+)', after_canal)
+            if tipo_match:
+                tipo = tipo_match.group(1).strip()
             
-            # El contenido está después de : | y antes del paréntesis
-            # Patrón: : |CONTENIDO(
+            # Si no encontró con patrón anterior, buscar palabra antes de | o después de números
+            if not tipo:
+                # Buscar patrón: números, espacios, luego palabras antes de |
+                tipo_match = re.search(r'\d+\s+([A-Za-z_][A-Za-z_0-9]*(?:\s+\d+)?)', after_canal)
+                if tipo_match:
+                    tipo = tipo_match.group(1).strip()
+                else:
+                    # Última opción: primera palabra no numérica
+                    words = after_canal.split()
+                    for word in words:
+                        if not word.replace('-', '').isdigit() and word not in [']', '[[', ']]', '|', '--']:
+                            tipo = word.strip()
+                            break
+            
+            # Extraer contenido entre el primer | y el siguiente | o (
             contenido = ""
-            contenido_match = re.search(r':\s*\|([^(]+)', after_canal)
+            # Patrón: después de | y antes de ( o siguiente |
+            contenido_match = re.search(r'\|([^|\(]+)', after_canal)
             if contenido_match:
                 contenido = contenido_match.group(1).strip()
+                # Limpiar espacios extras
+                contenido = ' '.join(contenido.split())
             
-            # Solo retornar si tenemos al menos canal y tipo
-            if canal and tipo:
+            # Solo retornar si tenemos al menos tipo (canal es opcional)
+            if tipo:
                 return Rotulo(canal=canal, tipo=tipo, contenido=contenido)
                 
-        except Exception:
-            # Si falla el parsing, retornar None
+        except Exception as e:
+            # Si falla el parsing, retornar None silenciosamente
             pass
         
         return None
@@ -585,22 +608,25 @@ class ContentManager:
         self._update_index()
 
     def _update_index(self):
-        """Genera/Actualiza el archivo index.json con el mapeo URL -> Ruta Local JSON."""
-        index_file = os.path.join(self.download_base, "index.json")
-        index_data = {}
-        
-        for url, tweet_id in self.state.items():
-            # Construir ruta absoluta al tweet_api.json
-            json_path = os.path.join(self.download_base, tweet_id, "tweet_api.json")
-            abs_json_path = os.path.abspath(json_path)
-            
-            # Verificar si existe para no meter basura (opcional, pero recomendable)
-            if os.path.exists(json_path):
-                index_data[url] = abs_json_path
+        """Genera/Actualiza el archivo index.csv con el mapeo URL -> Ruta Local JSON."""
+        index_file = os.path.join(self.download_base, "index.csv")
         
         try:
-            with open(index_file, "w", encoding="utf-8") as f:
-                json.dump(index_data, f, indent=4, ensure_ascii=False)
+            with open(index_file, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, delimiter=";")
+                # Escribir encabezado
+                writer.writerow(["URL", "RUTA LOCAL"])
+                
+                # Escribir datos
+                for url, tweet_id in self.state.items():
+                    # Construir ruta absoluta al tweet_api.json
+                    json_path = os.path.join(self.download_base, tweet_id, "tweet_api.json")
+                    abs_json_path = os.path.abspath(json_path)
+                    
+                    # Verificar si existe para no meter basura (opcional, pero recomendable)
+                    if os.path.exists(json_path):
+                        writer.writerow([url, abs_json_path])
+            
             self.logger.info(f"Índice maestro actualizado: {index_file}")
         except Exception as e:
             self.logger.error(f"Error actualizando índice maestro: {e}")
