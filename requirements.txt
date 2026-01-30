@@ -1,3 +1,8 @@
+# NOTA: ffmpeg debe instalarse manualmente en el sistema (no es un paquete pip)
+# Windows: https://ffmpeg.org/download.html o 'choco install ffmpeg'
+# Linux: sudo apt install ffmpeg
+# macOS: brew install ffmpeg
+
 beautifulsoup4>=4.14.3
 certifi>=2026.1.4
 charset-normalizer>=3.4.4

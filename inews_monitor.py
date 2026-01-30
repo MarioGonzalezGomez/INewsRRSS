@@ -434,6 +434,12 @@ class ContentManager:
             
             # Definir la clase personalizada heredando de la importada
             class CustomTweetScraper(scrape_tweet_api.TweetScraper):
+                def __init__(self, output_dir: str):
+                    """Inicializa sin crear directorios aún (se crean por tweet)."""
+                    super().__init__(output_dir)
+                    # No llamar a _setup_directories() aquí para evitar crear
+                    # carpetas innecesarias en la raíz base
+                
                 def run(self, tweet_url: str):
                     """Sobrescribe run para personalizar paths y JSON."""
                     tweet_id = self.extract_tweet_id(tweet_url)
@@ -571,10 +577,11 @@ class ContentManager:
         # Procesar NUEVOS
         if new_urls:
             self.logger.info(f"Detectadas {len(new_urls)} URLs nuevas para descargar.")
-            scraper = self.tweet_scraper_class(output_dir=self.download_base) # output_dir base, luego se ajusta en run
             
             for url in new_urls:
                 try:
+                    # Crear nueva instancia para cada URL para evitar anidamiento
+                    scraper = self.tweet_scraper_class(output_dir=self.download_base)
                     self.logger.info(f"Descargando contenido para: {url}")
                     # Extraer ID para guardar en estado
                     tweet_id = scraper.extract_tweet_id(url)
