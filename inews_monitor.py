@@ -20,6 +20,7 @@ import time
 import re
 import os
 import sys
+import csv
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from io import StringIO
@@ -207,47 +208,69 @@ class StoryParser:
         """
         Parsea un rótulo desde el contenido de una etiqueta <ap>.
         
-        Ejemplo de entrada: CAMIO ]] 1 YNNAM 0 [[ [CG1] Faldon | 00013523: |Faldon de AQLT(In  Dur
+        Soporta múltiples formatos:
+        1. Con [canal]: [A1-A2-A3] 10 QR -- 00010829: |contenido|
+        2. Sin canal: Faldon | 00013523: |contenido(
+        3. Antiguo: [CG1] Faldon | 00013523: |contenido(
         
         Extrae:
-        - Canal: CG1 (entre corchetes [XXX])
-        - Tipo: Faldon (primera palabra después del canal)
-        - Contenido: Faldon de AQLT (después de : |, hasta el paréntesis)
+        - Canal: Entre corchetes [XXX] o vacío
+        - Tipo: Palabra que identifica el tipo de rótulo
+        - Contenido: Texto entre el primer | y ( o siguiente |
         """
         if not ap_content or not ap_content.strip():
             return None
         
         try:
-            # Buscar el canal entre corchetes [XXX] - solo letras y números
-            canal_match = re.search(r'\[([A-Z0-9]+)\]', ap_content)
-            if not canal_match:
-                return None
+            # Buscar canal entre corchetes [XXX]
+            canal_match = re.search(r'\[([A-Za-z0-9\-]+)\]', ap_content)
+            canal = canal_match.group(1).strip() if canal_match else ""
             
-            canal = canal_match.group(1).strip()
+            # Si hay canal, obtener el texto después de él
+            if canal_match:
+                after_canal = ap_content[canal_match.end():].strip()
+            else:
+                after_canal = ap_content.strip()
             
-            # Obtener el texto después del canal
-            after_canal_index = canal_match.end()
-            after_canal = ap_content[after_canal_index:].strip()
+            # El tipo es una palabra que sigue patrones:
+            # - Después de números/códigos: "QR", "Titulo", "Tema", etc.
+            # - O la primera palabra: "Faldon", "Titular", etc.
+            tipo = ""
             
-            # El tipo es la primera palabra después del canal hasta el pipe |
-            pipe_index = after_canal.find('|')
-            tipo_section = after_canal[:pipe_index].strip() if pipe_index > 0 else after_canal
-            tipo_parts = tipo_section.split()
-            tipo = tipo_parts[0].strip() if tipo_parts else ""
+            # Intentar extraer tipo después de patrón "NN -- " (código)
+            tipo_match = re.search(r'--\s+\d+:\s+([A-Za-z_0-9]+)', after_canal)
+            if tipo_match:
+                tipo = tipo_match.group(1).strip()
             
-            # El contenido está después de : | y antes del paréntesis
-            # Patrón: : |CONTENIDO(
+            # Si no encontró con patrón anterior, buscar palabra antes de | o después de números
+            if not tipo:
+                # Buscar patrón: números, espacios, luego palabras antes de |
+                tipo_match = re.search(r'\d+\s+([A-Za-z_][A-Za-z_0-9]*(?:\s+\d+)?)', after_canal)
+                if tipo_match:
+                    tipo = tipo_match.group(1).strip()
+                else:
+                    # Última opción: primera palabra no numérica
+                    words = after_canal.split()
+                    for word in words:
+                        if not word.replace('-', '').isdigit() and word not in [']', '[[', ']]', '|', '--']:
+                            tipo = word.strip()
+                            break
+            
+            # Extraer contenido entre el primer | y el siguiente | o (
             contenido = ""
-            contenido_match = re.search(r':\s*\|([^(]+)', after_canal)
+            # Patrón: después de | y antes de ( o siguiente |
+            contenido_match = re.search(r'\|([^|\(]+)', after_canal)
             if contenido_match:
                 contenido = contenido_match.group(1).strip()
+                # Limpiar espacios extras
+                contenido = ' '.join(contenido.split())
             
-            # Solo retornar si tenemos al menos canal y tipo
-            if canal and tipo:
+            # Solo retornar si tenemos al menos tipo (canal es opcional)
+            if tipo:
                 return Rotulo(canal=canal, tipo=tipo, contenido=contenido)
                 
-        except Exception:
-            # Si falla el parsing, retornar None
+        except Exception as e:
+            # Si falla el parsing, retornar None silenciosamente
             pass
         
         return None
@@ -411,6 +434,12 @@ class ContentManager:
             
             # Definir la clase personalizada heredando de la importada
             class CustomTweetScraper(scrape_tweet_api.TweetScraper):
+                def __init__(self, output_dir: str):
+                    """Inicializa sin crear directorios aún (se crean por tweet)."""
+                    super().__init__(output_dir)
+                    # No llamar a _setup_directories() aquí para evitar crear
+                    # carpetas innecesarias en la raíz base
+                
                 def run(self, tweet_url: str):
                     """Sobrescribe run para personalizar paths y JSON."""
                     tweet_id = self.extract_tweet_id(tweet_url)
@@ -548,10 +577,11 @@ class ContentManager:
         # Procesar NUEVOS
         if new_urls:
             self.logger.info(f"Detectadas {len(new_urls)} URLs nuevas para descargar.")
-            scraper = self.tweet_scraper_class(output_dir=self.download_base) # output_dir base, luego se ajusta en run
             
             for url in new_urls:
                 try:
+                    # Crear nueva instancia para cada URL para evitar anidamiento
+                    scraper = self.tweet_scraper_class(output_dir=self.download_base)
                     self.logger.info(f"Descargando contenido para: {url}")
                     # Extraer ID para guardar en estado
                     tweet_id = scraper.extract_tweet_id(url)
@@ -585,29 +615,108 @@ class ContentManager:
         self._update_index()
 
     def _update_index(self):
-        """Genera/Actualiza el archivo index.json con el mapeo URL -> Ruta Local JSON."""
-        index_file = os.path.join(self.download_base, "index.json")
-        index_data = {}
-        
-        for url, tweet_id in self.state.items():
-            # Construir ruta absoluta al tweet_api.json
-            json_path = os.path.join(self.download_base, tweet_id, "tweet_api.json")
-            abs_json_path = os.path.abspath(json_path)
-            
-            # Verificar si existe para no meter basura (opcional, pero recomendable)
-            if os.path.exists(json_path):
-                index_data[url] = abs_json_path
+        """Genera/Actualiza el archivo index.csv con el mapeo URL -> Ruta Local JSON."""
+        index_file = os.path.join(self.download_base, "index.csv")
         
         try:
-            with open(index_file, "w", encoding="utf-8") as f:
-                json.dump(index_data, f, indent=4, ensure_ascii=False)
+            with open(index_file, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, delimiter=";")
+                # Escribir encabezado
+                writer.writerow(["URL", "RUTA LOCAL"])
+                
+                # Escribir datos
+                for url, tweet_id in self.state.items():
+                    # Construir ruta absoluta al tweet_api.json
+                    json_path = os.path.join(self.download_base, tweet_id, "tweet_api.json")
+                    abs_json_path = os.path.abspath(json_path)
+                    
+                    # Verificar si existe para no meter basura (opcional, pero recomendable)
+                    if os.path.exists(json_path):
+                        writer.writerow([url, abs_json_path])
+            
             self.logger.info(f"Índice maestro actualizado: {index_file}")
         except Exception as e:
             self.logger.error(f"Error actualizando índice maestro: {e}")
 
 
+class RundownWatcher:
+    """
+    Gestiona el estado y monitoreo de UN minutado específico.
+    """
+    def __init__(self, name: str, config: Dict, connection: INewsConnection):
+        self.name = name
+        self.path = config.get("rundown_path")
+        self.interval = config.get("interval_seconds", 30)
+        self.ap_filter = config.get("ap_filter", "")
+        self.connection = connection
+        
+        self.last_run_time = 0
+        self.last_entries: Dict[str, str] = {}  # entry_name -> hash
+        self.active_urls: List[str] = [] # URLs encontradas en la última pasada exitosa
+        self.logger = logging.getLogger(f"Watcher_{name}")
+
+    def is_due(self) -> bool:
+        """Verifica si es hora de ejecutar este monitor."""
+        return (time.time() - self.last_run_time) >= self.interval
+
+    def process(self) -> List[Dict]:
+        """
+        Ejecuta la revisión de este minutado.
+        Retorna la lista de entradas filtradas (nuevas/modificadas).
+        Actualiza self.active_urls con TODAS las URLs vigentes en el minutado.
+        """
+        self.logger.info(f"Ejecutando revisión para {self.name}...")
+        self.last_run_time = time.time()
+        
+        entries = self.connection.list_entries(self.path)
+        if not entries:
+            self.logger.warning(f"No se encontraron entradas o error al listar {self.path}")
+            # Si falla, no limpiamos active_urls para evitar borrar contenido por error de red
+            return []
+        
+        filtered_results = []
+        current_urls = []
+        
+        for entry in entries:
+            entry_name = entry.get("name", "")
+            if not entry_name or entry.get("is_dir", False):
+                continue
+            
+            content = self.connection.read_story(entry_name)
+            if not content:
+                continue
+            
+            # Filtros
+            if not StoryParser.matches_ap_filter(content, self.ap_filter):
+                continue
+                
+            story_info = StoryParser.extract_story_info(content)
+            
+            # Recolectar URLs (de todas las historias válidas)
+            current_urls.extend(story_info.get('urls', []))
+            
+            # Detectar cambios
+            content_hash = hash(content)
+            previous_hash = self.last_entries.get(entry_name)
+            
+            if previous_hash != content_hash:
+                self.last_entries[entry_name] = content_hash
+                
+                result = {
+                    "entry_name": entry_name,
+                    "content": content,
+                    "info": story_info,
+                    "timestamp": datetime.now().isoformat(),
+                    "watcher_name": self.name
+                }
+                filtered_results.append(result)
+        
+        self.active_urls = current_urls
+        return filtered_results
+
+
 class INewsMonitor:
-    """Servicio de monitoreo de minutado de iNews."""
+    """Servicio de monitoreo de MÚLTIPLES minutados de iNews."""
     
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
@@ -623,231 +732,137 @@ class INewsMonitor:
             password=self.config["inews"]["password"]
         )
         
+        self.watchers: List[RundownWatcher] = []
+        self._initialize_watchers()
+        
         self.running = False
-        self.last_entries: Dict[str, str] = {}  # nombre -> hash/contenido para detectar cambios
-    
+        
     def _load_config(self) -> Dict:
-        """Carga la configuración desde el archivo JSON."""
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except FileNotFoundError:
-            print(f"ERROR: No se encontró el archivo de configuración: {self.config_path}")
+        except Exception as e:
+            print(f"ERROR cargando config: {e}")
             sys.exit(1)
-        except json.JSONDecodeError as e:
-            print(f"ERROR: Archivo de configuración inválido: {e}")
-            sys.exit(1)
-    
+
     def _setup_logging(self):
-        """Configura el sistema de logging."""
         log_config = self.config.get("logging", {})
         log_level = getattr(logging, log_config.get("level", "INFO"))
         log_file = log_config.get("file", "inews_monitor.log")
         
-        # Configurar formato
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        
-        # Handler para archivo
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setFormatter(formatter)
-        
-        # Handler para consola
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         
-        # Configurar logger raíz
-        root_logger = logging.getLogger()
-        root_logger.setLevel(log_level)
-        root_logger.addHandler(file_handler)
-        root_logger.addHandler(console_handler)
-    
-    def get_rundown_entries(self) -> List[Dict]:
-        """Obtiene la lista de entradas del minutado configurado."""
-        rundown_path = self.config["inews"]["rundown_path"]
-        return self.connection.list_entries(rundown_path)
-    
-    def process_entry(self, entry: Dict) -> Optional[Dict]:
-        """
-        Procesa una entrada del minutado: lee su contenido y extrae información.
-        
-        Returns:
-            Diccionario con la información de la entrada si pasa el filtro, None si no
-        """
-        entry_name = entry.get("name", "")
-        if not entry_name or entry.get("is_dir", False):
-            return None
-        
-        # Leer contenido NSML
-        content = self.connection.read_story(entry_name)
-        if not content:
-            return None
-        
-        # Verificar filtro de etiqueta <ap>
-        ap_filter = self.config["monitor"].get("ap_filter", "")
-        if not StoryParser.matches_ap_filter(content, ap_filter):
-            return None
-        
-        # Extraer información
-        story_info = StoryParser.extract_story_info(content)
-        
-        return {
-            "entry_name": entry_name,
-            "content": content,
-            "info": story_info,
-            "timestamp": datetime.now().isoformat()
-        }
-    
-    def check_for_changes(self, entry_name: str, content: str) -> bool:
-        """Verifica si una entrada ha cambiado desde la última revisión."""
-        content_hash = hash(content)
-        previous_hash = self.last_entries.get(entry_name)
-        
-        if previous_hash != content_hash:
-            self.last_entries[entry_name] = content_hash
-            return True
-        return False
-    
-    def run_once(self) -> List[Dict]:
-        """
-        Ejecuta una sola iteración del monitoreo.
-        
-        Returns:
-            Lista de entradas que pasaron el filtro
-        """
-        self.logger.info("Iniciando revisión del minutado...")
-        
-        if not self.connection.connect():
-            self.logger.error("No se pudo conectar al servidor iNews")
-            return []
-        
-        try:
-            entries = self.get_rundown_entries()
-            self.logger.info(f"Encontradas {len(entries)} entradas en el minutado")
-            
-            filtered_results = []
-            all_found_urls = []
-            
-            for entry in entries:
-                result = self.process_entry(entry)
-                if result:
-                    # Recolectar URLs activas
-                    urls = result['info'].get('urls', [])
-                    all_found_urls.extend(urls)
-                    
-                    is_new_or_changed = self.check_for_changes(
-                        result["entry_name"],
-                        result["content"]
-                    )
-                    
-                    if is_new_or_changed:
-                        urls = result['info'].get('urls', [])
-                        rotulos = result['info'].get('rotulos_filtrados', [])
-                        
-                        self.logger.info(
-                            f"Entrada filtrada: {result['entry_name']} - "
-                            f"Título: {result['info']['title']} - "
-                            f"URLs: {len(urls)}"
-                        )
-                        filtered_results.append(result)
-                        
-                        # Mostrar rótulos y URLs
-                        print("\n" + "="*60)
-                        print(f"ENTRADA: {result['entry_name']}")
-                        print(f"TÍTULO: {result['info']['title']}")
-                        print("-"*60)
-                        print("RÓTULOS ENCONTRADOS:")
-                        for r in rotulos:
-                            print(f"  - Canal: {r['canal']}, Tipo: {r['tipo']}")
-                            print(f"    Contenido/URL: {r['contenido']}")
-                        print("-"*60)
-                        print("URLs PARA DESCARGA:")
-                        for url in urls:
-                            print(f"  → {url}")
-                        print("="*60 + "\n")
-            
-            # Sincronizar contenido (descargar nuevos, borrar viejos)
-            self.content_manager.sync_content(all_found_urls)
+        root = logging.getLogger()
+        root.setLevel(log_level)
+        if not root.handlers:
+            root.addHandler(file_handler)
+            root.addHandler(console_handler)
 
-            self.logger.info(f"Revisión completada. {len(filtered_results)} entradas nuevas/modificadas")
-            return filtered_results
+    def _initialize_watchers(self):
+        """Inicializa los watchers basados en la configuración."""
+        # Configuración legacy
+        if "monitor" in self.config and "rundown_path" in self.config["inews"]:
+            legacy_conf = {
+                "rundown_path": self.config["inews"]["rundown_path"],
+                "interval_seconds": self.config["monitor"].get("interval_seconds", 30),
+                "ap_filter": self.config["monitor"].get("ap_filter", "")
+            }
+            self.watchers.append(RundownWatcher("DEFAULT", legacy_conf, self.connection))
             
-        finally:
-            self.connection.disconnect()
-    
-    def run(self):
-        """Ejecuta el monitoreo continuo."""
-        interval = self.config["monitor"].get("interval_seconds", 30)
-        self.running = True
+        # Nueva configuración lista de monitores
+        monitors = self.config.get("monitors", [])
+        for i, m_conf in enumerate(monitors):
+            name = m_conf.get("name", f"MONITOR_{i+1}")
+            merged_conf = m_conf.copy()
+            if "ap_filter" not in merged_conf:
+                 merged_conf["ap_filter"] = self.config.get("monitor", {}).get("ap_filter", "")
+                 
+            self.watchers.append(RundownWatcher(name, merged_conf, self.connection))
+            
+        self.logger.info(f"Inicializados {len(self.watchers)} watchers.")
+
+    def run_once(self):
+        """Ejecuta una pasada de todos los watchers pendientes."""
+        if not self.connection.ensure_connected():
+            self.logger.error("No se pudo conectar a iNews")
+            return
+
+        any_processed = False
+        all_new_results = []
         
-        self.logger.info(f"Iniciando monitoreo continuo (intervalo: {interval}s)")
-        self.logger.info(f"Ruta del minutado: {self.config['inews']['rundown_path']}")
-        self.logger.info("Presiona Ctrl+C para detener")
+        for watcher in self.watchers:
+            if watcher.is_due():
+                # Asegurar navegación al directorio correcto
+                if self.connection.navigate_to(watcher.path):
+                    results = watcher.process()
+                    if results:
+                        all_new_results.extend(results)
+                        self._print_results(results, watcher.name)
+                    any_processed = True
+                else:
+                    self.logger.error(f"Fallo navegando a {watcher.path}")
+
+        if any_processed:
+            total_urls = set()
+            for w in self.watchers:
+                total_urls.update(w.active_urls)
+            
+            self.content_manager.sync_content(list(total_urls))
+            
+        return all_new_results
+
+    def _print_results(self, results, source_name):
+        for result in results:
+            urls = result['info'].get('urls', [])
+            rotulos = result['info'].get('rotulos_filtrados', [])
+            
+            print("\n" + "="*60)
+            print(f"FUENTE: {source_name}")
+            print(f"ENTRADA: {result['entry_name']}")
+            print(f"TÍTULO: {result['info']['title']}")
+            print("-"*60)
+            print("RÓTULOS ENCONTRADOS:")
+            for r in rotulos:
+                print(f"  - Canal: {r['canal']}, Tipo: {r['tipo']}")
+                print(f"    Contenido/URL: {r['contenido']}")
+            print("-"*60)
+            print("URLs PARA DESCARGA:")
+            for url in urls:
+                print(f"  → {url}")
+            print("="*60 + "\n")
+
+    def run(self):
+        self.running = True
+        self.logger.info("Iniciando monitoreo multi-rundown...")
         
         try:
             while self.running:
                 self.run_once()
-                
-                self.logger.debug(f"Esperando {interval} segundos hasta la próxima revisión...")
-                time.sleep(interval)
-                
+                time.sleep(1) 
         except KeyboardInterrupt:
-            self.logger.info("Deteniendo monitoreo...")
-            self.running = False
+            self.logger.info("Deteniendo...")
         finally:
             self.connection.disconnect()
-            self.logger.info("Monitor detenido")
-    
-    def stop(self):
-        """Detiene el monitoreo."""
-        self.running = False
-
 
 def main():
-    """Punto de entrada principal."""
-    parser = argparse.ArgumentParser(
-        description='Monitor de minutado iNews',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Ejemplos:
-  python inews_monitor.py                    # Ejecutar en modo continuo
-  python inews_monitor.py --once             # Ejecutar una sola vez
-  python inews_monitor.py --config mi_config.json  # Usar config alternativo
-        """
-    )
-    
-    parser.add_argument(
-        '--config', '-c',
-        default='config.json',
-        help='Ruta al archivo de configuración (default: config.json)'
-    )
-    
-    parser.add_argument(
-        '--once', '-o',
-        action='store_true',
-        help='Ejecutar una sola revisión y terminar'
-    )
-    
+    parser = argparse.ArgumentParser(description='Monitor iNews Multi-Rundown')
+    parser.add_argument('--config', '-c', default='config.json', help='Config file')
+    parser.add_argument('--once', '-o', action='store_true', help='Ejecutar una vez y salir')
     args = parser.parse_args()
     
-    # Cambiar al directorio del script para encontrar el config
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
-    
-    print("="*60)
-    print("  iNews Monitor Service")
-    print("="*60)
     
     monitor = INewsMonitor(config_path=args.config)
     
     if args.once:
-        results = monitor.run_once()
-        print(f"\nTotal de entradas filtradas: {len(results)}")
+        monitor.run_once()
     else:
         monitor.run()
-
 
 if __name__ == "__main__":
     main()
