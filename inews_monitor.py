@@ -741,7 +741,9 @@ class ContentManager:
                     
                     # Verificar si existe para no meter basura (opcional, pero recomendable)
                     if os.path.exists(json_path):
-                        writer.writerow([url, abs_json_path])
+                        # Usar el directorio padre (carpeta del tweet) en lugar del archivo json
+                        abs_folder_path = os.path.dirname(abs_json_path)
+                        writer.writerow([url, abs_folder_path])
             
             self.logger.info(f"Índice maestro actualizado: {index_file}")
         except Exception as e:
