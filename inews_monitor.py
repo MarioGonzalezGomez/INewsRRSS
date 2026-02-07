@@ -401,7 +401,80 @@ class StoryParser:
 
 
 import shutil
+import subprocess
 import importlib.util
+
+def _robust_rmtree(path: str, logger=None) -> bool:
+    """
+    Elimina un directorio de forma robusta, manejando errores de permisos.
+    Intenta múltiples métodos si el primero falla.
+    
+    Returns:
+        True si se eliminó correctamente, False si falló
+    """
+    import stat
+    
+    def handle_remove_readonly(func, path, exc_info):
+        """Handler para errores de permisos en shutil.rmtree"""
+        # Si es error de permisos, intentar quitar readonly y reintentar
+        if exc_info[0] == PermissionError:
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except:
+                pass
+    
+    # Método 1: shutil.rmtree con handler de errores
+    try:
+        shutil.rmtree(path, onerror=handle_remove_readonly)
+        if not os.path.exists(path):
+            return True
+    except Exception as e:
+        if logger:
+            logger.debug(f"shutil.rmtree falló para {path}: {e}")
+    
+    # Método 2: Usar cmd rmdir /s /q (Windows)
+    if os.name == 'nt':
+        try:
+            result = subprocess.run(
+                ['cmd', '/c', 'rmdir', '/s', '/q', path],
+                capture_output=True,
+                timeout=30
+            )
+            if not os.path.exists(path):
+                return True
+        except Exception as e:
+            if logger:
+                logger.debug(f"cmd rmdir falló para {path}: {e}")
+        
+        # Método 3: takeown + icacls + rmdir (requiere permisos)
+        try:
+            subprocess.run(
+                ['takeown', '/f', path, '/r', '/d', 'y'],
+                capture_output=True,
+                timeout=30
+            )
+            subprocess.run(
+                ['icacls', path, '/grant', f'{os.environ.get("USERNAME", "Everyone")}:F', '/t'],
+                capture_output=True,
+                timeout=30
+            )
+            subprocess.run(
+                ['cmd', '/c', 'rmdir', '/s', '/q', path],
+                capture_output=True,
+                timeout=30
+            )
+            if not os.path.exists(path):
+                return True
+        except Exception as e:
+            if logger:
+                logger.debug(f"takeown/icacls falló para {path}: {e}")
+    
+    # Si llegamos aquí, no pudimos eliminar
+    if logger:
+        logger.warning(f"No se pudo eliminar carpeta: {path}")
+    return False
+
 
 class ContentManager:
     """Gestiona la descarga y limpieza de contenido multimedia de Twitter."""
@@ -604,7 +677,8 @@ class ContentManager:
                     if os.path.exists(folder_path):
                         try:
                             self.logger.info(f"Eliminando carpeta obsoleta: {folder_path}")
-                            shutil.rmtree(folder_path)
+                            if not _robust_rmtree(folder_path, self.logger):
+                                self.logger.error(f"No se pudo eliminar carpeta {folder_path}")
                         except Exception as e:
                             self.logger.error(f"Error eliminando carpeta {folder_path}: {e}")
                 
@@ -680,9 +754,45 @@ class RundownWatcher:
         filtered_results = []
         current_urls = []
         
+        # Nombres especiales de iNews que no son stories válidas
+        INVALID_STORY_NAMES = {'ibc', 'data', 'metadata', 'locator', 'info'}
+        
+        def is_valid_story_name(name: str) -> bool:
+            """Verifica si un nombre parece ser una story válida de iNews."""
+            # Nombres vacíos o muy cortos (1-2 caracteres como 't', 'f', 'a')
+            if not name or len(name) <= 2:
+                return False
+            
+            # Nombres que empiezan por '.'
+            if name.startswith('.'):
+                return False
+            
+            # Nombres conocidos del sistema
+            if name.lower() in INVALID_STORY_NAMES:
+                return False
+            
+            # Nombres con / o \ (rutas como 'a/b')
+            if '/' in name or '\\' in name:
+                return False
+            
+            # Patrones linX (lin1, lin2, etc.)
+            if re.match(r'^lin\d+$', name.lower()):
+                return False
+            
+            # Nombres con caracteres no alfanuméricos (como '???')
+            # Las stories válidas suelen ser alfanuméricas con guiones/underscores
+            if not re.match(r'^[\w\-\s]+$', name):
+                return False
+            
+            return True
+        
         for entry in entries:
             entry_name = entry.get("name", "")
             if not entry_name or entry.get("is_dir", False):
+                continue
+            
+            # Filtrar entradas que no son stories válidas
+            if not is_valid_story_name(entry_name):
                 continue
             
             content = self.connection.read_story(entry_name)
