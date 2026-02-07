@@ -561,8 +561,8 @@ class ContentManager:
         except Exception as e:
             self.logger.error(f"Error guardando estado: {e}")
 
-    def sync_content(self, current_urls: List[str]):
-        """Sincroniza el contenido: descarga nuevos, borra obsoletos."""
+    def sync_content(self, current_urls: List[str], clean: bool = True):
+        """Sincroniza el contenido: descarga nuevos, borra obsoletos si clean=True."""
         if not self.tweet_scraper_class:
             self.logger.error("No se puede sincronizar: Scraper no cargado.")
             return
@@ -594,8 +594,8 @@ class ContentManager:
                 except Exception as e:
                     self.logger.error(f"Error descargando {url}: {e}")
 
-        # Procesar OBSOLETOS
-        if obsolete_urls:
+        # Procesar OBSOLETOS (Sólo si clean es True)
+        if clean and obsolete_urls:
             self.logger.info(f"Detectadas {len(obsolete_urls)} URLs obsoletas. Limpiando...")
             for url in obsolete_urls:
                 tweet_id = self.state.get(url)
@@ -610,6 +610,8 @@ class ContentManager:
                 
                 del self.state[url]
                 self._save_state()
+        elif obsolete_urls:
+            self.logger.info(f"Detectadas {len(obsolete_urls)} URLs obsoletas (Limpieza PENDIENTE).")
         
         # Siempre actualizar el índice maestro al final de la sincronización
         self._update_index()
@@ -653,6 +655,7 @@ class RundownWatcher:
         self.last_run_time = 0
         self.last_entries: Dict[str, str] = {}  # entry_name -> hash
         self.active_urls: List[str] = [] # URLs encontradas en la última pasada exitosa
+        self.has_run = False # Indica si el watcher ha completado al menos una ejecución
         self.logger = logging.getLogger(f"Watcher_{name}")
 
     def is_due(self) -> bool:
@@ -712,6 +715,7 @@ class RundownWatcher:
                 filtered_results.append(result)
         
         self.active_urls = current_urls
+        self.has_run = True
         return filtered_results
 
 
@@ -734,6 +738,10 @@ class INewsMonitor:
         
         self.watchers: List[RundownWatcher] = []
         self._initialize_watchers()
+
+        # Configuración de limpieza
+        self.cleaning_interval = self.config.get("cleaning_interval_seconds", 3600) # Default 1 hora
+        self.last_clean_time = 0 
         
         self.running = False
         
@@ -806,12 +814,30 @@ class INewsMonitor:
                 else:
                     self.logger.error(f"Fallo navegando a {watcher.path}")
 
-        if any_processed:
+        if any_processed or all_new_results:
+            # Sincronización
             total_urls = set()
+            all_watchers_ready = True
+            
             for w in self.watchers:
                 total_urls.update(w.active_urls)
+                if not w.has_run:
+                    all_watchers_ready = False
             
-            self.content_manager.sync_content(list(total_urls))
+            # Determinar si debemos limpiar
+            # 1. Todos los watchers deben haber reportado al menos una vez (para no borrar cosas de un rundown que no hemos leído aún)
+            # 2. Debe haber pasado el intervalo de limpieza
+            should_clean = False
+            current_time = time.time()
+            
+            if all_watchers_ready:
+                if current_time - self.last_clean_time >= self.cleaning_interval:
+                    should_clean = True
+                    self.last_clean_time = current_time
+            else:
+                self.logger.debug("Esperando a que todos los watchers se inicialicen para permitir limpieza...")
+
+            self.content_manager.sync_content(list(total_urls), clean=should_clean)
             
         return all_new_results
 
