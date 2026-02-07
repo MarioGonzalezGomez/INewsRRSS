@@ -24,6 +24,13 @@ import csv
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from io import StringIO
+import io
+
+# Force UTF-8 for stdout/stderr to avoid crashes with emojis on Windows
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
 class INewsConnection:
@@ -497,13 +504,24 @@ class ContentManager:
     def _load_twitter_scraper_class(self):
         """Carga la clase TweetScraper desde la ruta configurada."""
         scripts_path = self.config.get("content", {}).get("scripts_twitter_path")
+        
+        # Fallback: intentar buscar ScriptsTwitter en el directorio actual si la config falla
         if not scripts_path or not os.path.exists(scripts_path):
-            self.logger.warning(f"Ruta de scripts Twitter no válida: {scripts_path}")
-            return None
+            local_scripts = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ScriptsTwitter")
+            if os.path.exists(local_scripts):
+                self.logger.warning(f"Ruta config no válida ({scripts_path}), usando local: {local_scripts}")
+                scripts_path = local_scripts
+            else:
+                self.logger.error(f"Ruta de scripts Twitter no válida y no hallada localmente: {scripts_path}")
+                return None
             
         sys.path.append(scripts_path)
         try:
+            if scripts_path not in sys.path:
+                sys.path.append(scripts_path)
+            
             import scrape_tweet_api
+            print(f"[OK] Motor de descarga Twitter cargado correctamente.")
             
             # Definir la clase personalizada heredando de la importada
             class CustomTweetScraper(scrape_tweet_api.TweetScraper):
@@ -517,7 +535,7 @@ class ContentManager:
                     """Sobrescribe run para personalizar paths y JSON."""
                     tweet_id = self.extract_tweet_id(tweet_url)
                     if not tweet_id:
-                        print("❌ No se pudo extraer ID")
+                        print(f"[X] No se pudo extraer ID")
                         return
 
                     try:
@@ -576,7 +594,7 @@ class ContentManager:
                                 full_downloaded_path = os.path.join(self.temp_folder_video, downloaded_video)
                                 self.convertir_a_25fps(full_downloaded_path, video_final_path)
                                 data["tweet_video"] = abs_video
-                                print(f"✅ Video guardado: {abs_video}")
+                                print(f"[OK] Video guardado: {abs_video}")
 
                         # Eliminar has_video si no se quiere en JSON final o dejarlo
                         if "has_video" in data: del data["has_video"]
@@ -599,16 +617,31 @@ class ContentManager:
                         # Guardar JSON
                         json_path = os.path.join(self.output_dir, "tweet_api.json")
                         self.save_to_json(data, json_path)
-                        print(f"✅ JSON guardado en: {json_path}")
+                        print(f"[OK] JSON guardado en: {json_path}")
                         
                         # Limpiar temp video
                         try: shutil.rmtree(self.temp_folder_video)
                         except: pass
 
+                        # FINALMENTE: Asegurar permisos para todos los archivos generados
+                        self._grant_permissions(tweet_dir)
+
                     except Exception as e:
-                        print(f"❌ Error procesando tweet {tweet_id}: {e}")
+                        print(f"[X] Error procesando tweet {tweet_id}: {e}")
                         import traceback
                         traceback.print_exc()
+
+                def _grant_permissions(self, path: str):
+                    """Otorga control total a Everyone/Todos sobre la carpeta y su contenido."""
+                    try:
+                        # Intentar grupo en Inglés
+                        subprocess.run(['icacls', path, '/grant', 'Everyone:F', '/t', '/c', '/q'], 
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        # Intentar grupo en Español
+                        subprocess.run(['icacls', path, '/grant', 'Todos:F', '/t', '/c', '/q'], 
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception as e:
+                        print(f"⚠️ Warning: No se pudieron establecer permisos explícitos: {e}")
 
             return CustomTweetScraper
             
