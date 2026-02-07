@@ -813,9 +813,11 @@ class RundownWatcher:
                 return False
             
             # Nombres con caracteres no alfanuméricos (como '???')
-            # Las stories válidas suelen ser alfanuméricas con guiones/underscores
-            if not re.match(r'^[\w\-\s]+$', name):
+            # Las stories válidas suelen ser alfanuméricas con guiones/underscores/dos puntos
+            if not re.match(r'^[\w\-\s:]+$', name):
                 return False
+            
+            
             
             return True
         
@@ -855,6 +857,8 @@ class RundownWatcher:
                     "timestamp": datetime.now().isoformat(),
                     "watcher_name": self.name
                 }
+                filtered_results.append(result)
+        
                 filtered_results.append(result)
         
         self.active_urls = current_urls
