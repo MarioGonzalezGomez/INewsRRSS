@@ -21,6 +21,8 @@ import re
 import os
 import sys
 import csv
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from io import StringIO
@@ -644,32 +646,55 @@ class ContentManager:
 class RundownWatcher:
     """
     Gestiona el estado y monitoreo de UN minutado específico.
+    Cada watcher tiene su propia conexión FTP para permitir procesamiento en paralelo.
     """
-    def __init__(self, name: str, config: Dict, connection: INewsConnection):
+    def __init__(self, name: str, config: Dict, inews_config: Dict):
         self.name = name
         self.path = config.get("rundown_path")
         self.interval = config.get("interval_seconds", 30)
         self.ap_filter = config.get("ap_filter", "")
-        self.connection = connection
+        
+        # Cada watcher tiene su propia conexión FTP independiente
+        self.connection = INewsConnection(
+            host=inews_config["host"],
+            user=inews_config["user"],
+            password=inews_config["password"]
+        )
         
         self.last_run_time = 0
         self.last_entries: Dict[str, str] = {}  # entry_name -> hash
         self.active_urls: List[str] = [] # URLs encontradas en la última pasada exitosa
         self.has_run = False # Indica si el watcher ha completado al menos una ejecución
         self.logger = logging.getLogger(f"Watcher_{name}")
+        self._lock = threading.Lock()  # Protege acceso concurrente al estado del watcher
 
     def is_due(self) -> bool:
         """Verifica si es hora de ejecutar este monitor."""
         return (time.time() - self.last_run_time) >= self.interval
+
+    def disconnect(self):
+        """Cierra la conexión FTP de este watcher."""
+        self.connection.disconnect()
 
     def process(self) -> List[Dict]:
         """
         Ejecuta la revisión de este minutado.
         Retorna la lista de entradas filtradas (nuevas/modificadas).
         Actualiza self.active_urls con TODAS las URLs vigentes en el minutado.
+        
+        Cada watcher navega con su propia conexión, permitiendo ejecución en paralelo.
         """
         self.logger.info(f"Ejecutando revisión para {self.name}...")
         self.last_run_time = time.time()
+        
+        # Asegurar conexión y navegar al directorio correcto
+        if not self.connection.ensure_connected():
+            self.logger.error(f"No se pudo conectar a iNews para {self.name}")
+            return []
+        
+        if not self.connection.navigate_to(self.path):
+            self.logger.error(f"Fallo navegando a {self.path}")
+            return []
         
         entries = self.connection.list_entries(self.path)
         if not entries:
@@ -714,13 +739,18 @@ class RundownWatcher:
                 }
                 filtered_results.append(result)
         
-        self.active_urls = current_urls
-        self.has_run = True
+        with self._lock:
+            self.active_urls = current_urls
+            self.has_run = True
         return filtered_results
 
 
 class INewsMonitor:
-    """Servicio de monitoreo de MÚLTIPLES minutados de iNews."""
+    """
+    Servicio de monitoreo de MÚLTIPLES minutados de iNews.
+    Soporta hasta 20 monitores simultáneos con procesamiento en paralelo.
+    Cada watcher tiene su propia conexión FTP independiente.
+    """
     
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
@@ -730,11 +760,8 @@ class INewsMonitor:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.content_manager = ContentManager(self.config, self.logger)
         
-        self.connection = INewsConnection(
-            host=self.config["inews"]["host"],
-            user=self.config["inews"]["user"],
-            password=self.config["inews"]["password"]
-        )
+        # Paralelismo configurable (default 5 hilos, máximo razonable para FTP)
+        self.max_workers = self.config.get("monitor", {}).get("max_workers", 5)
         
         self.watchers: List[RundownWatcher] = []
         self._initialize_watchers()
@@ -742,6 +769,9 @@ class INewsMonitor:
         # Configuración de limpieza
         self.cleaning_interval = self.config.get("cleaning_interval_seconds", 3600) # Default 1 hora
         self.last_clean_time = 0 
+        
+        # Lock para proteger la impresión por consola desde múltiples hilos
+        self._print_lock = threading.Lock()
         
         self.running = False
         
@@ -771,7 +801,10 @@ class INewsMonitor:
             root.addHandler(console_handler)
 
     def _initialize_watchers(self):
-        """Inicializa los watchers basados en la configuración."""
+        """Inicializa los watchers basados en la configuración.
+        Cada watcher recibe su propia conexión FTP independiente."""
+        inews_config = self.config["inews"]
+        
         # Configuración legacy
         if "monitor" in self.config and "rundown_path" in self.config["inews"]:
             legacy_conf = {
@@ -779,7 +812,7 @@ class INewsMonitor:
                 "interval_seconds": self.config["monitor"].get("interval_seconds", 30),
                 "ap_filter": self.config["monitor"].get("ap_filter", "")
             }
-            self.watchers.append(RundownWatcher("DEFAULT", legacy_conf, self.connection))
+            self.watchers.append(RundownWatcher("DEFAULT", legacy_conf, inews_config))
             
         # Nueva configuración lista de monitores
         monitors = self.config.get("monitors", [])
@@ -789,33 +822,55 @@ class INewsMonitor:
             if "ap_filter" not in merged_conf:
                  merged_conf["ap_filter"] = self.config.get("monitor", {}).get("ap_filter", "")
                  
-            self.watchers.append(RundownWatcher(name, merged_conf, self.connection))
+            self.watchers.append(RundownWatcher(name, merged_conf, inews_config))
             
-        self.logger.info(f"Inicializados {len(self.watchers)} watchers.")
+        self.logger.info(f"Inicializados {len(self.watchers)} watchers (max_workers={self.max_workers}).")
+
+    def _process_watcher(self, watcher: RundownWatcher) -> List[Dict]:
+        """Procesa un watcher individual. Se ejecuta en un hilo del pool.
+        Captura excepciones para aislar fallos entre watchers."""
+        try:
+            results = watcher.process()
+            if results:
+                with self._print_lock:
+                    self._print_results(results, watcher.name)
+            return results
+        except Exception as e:
+            self.logger.error(f"Error procesando watcher {watcher.name}: {e}", exc_info=True)
+            return []
 
     def run_once(self):
-        """Ejecuta una pasada de todos los watchers pendientes."""
-        if not self.connection.ensure_connected():
-            self.logger.error("No se pudo conectar a iNews")
-            return
+        """Ejecuta una pasada de todos los watchers pendientes EN PARALELO."""
+        due_watchers = [w for w in self.watchers if w.is_due()]
+        
+        if not due_watchers:
+            return []
 
         any_processed = False
         all_new_results = []
         
-        for watcher in self.watchers:
-            if watcher.is_due():
-                # Asegurar navegación al directorio correcto
-                if self.connection.navigate_to(watcher.path):
-                    results = watcher.process()
+        # Ejecutar watchers en paralelo con ThreadPoolExecutor
+        effective_workers = min(self.max_workers, len(due_watchers))
+        self.logger.debug(f"Procesando {len(due_watchers)} watchers con {effective_workers} hilos...")
+        
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            future_to_watcher = {
+                executor.submit(self._process_watcher, w): w 
+                for w in due_watchers
+            }
+            
+            for future in as_completed(future_to_watcher):
+                watcher = future_to_watcher[future]
+                try:
+                    results = future.result()
                     if results:
                         all_new_results.extend(results)
-                        self._print_results(results, watcher.name)
                     any_processed = True
-                else:
-                    self.logger.error(f"Fallo navegando a {watcher.path}")
+                except Exception as e:
+                    self.logger.error(f"Excepción inesperada en watcher {watcher.name}: {e}", exc_info=True)
 
         if any_processed or all_new_results:
-            # Sincronización
+            # Sincronización (en hilo principal, después de que todos terminen)
             total_urls = set()
             all_watchers_ready = True
             
@@ -861,9 +916,17 @@ class INewsMonitor:
                 print(f"  → {url}")
             print("="*60 + "\n")
 
+    def _disconnect_all(self):
+        """Desconecta todas las conexiones FTP de todos los watchers."""
+        for w in self.watchers:
+            try:
+                w.disconnect()
+            except Exception:
+                pass
+
     def run(self):
         self.running = True
-        self.logger.info("Iniciando monitoreo multi-rundown...")
+        self.logger.info(f"Iniciando monitoreo multi-rundown paralelo ({len(self.watchers)} watchers, {self.max_workers} hilos max)...")
         
         try:
             while self.running:
@@ -872,7 +935,7 @@ class INewsMonitor:
         except KeyboardInterrupt:
             self.logger.info("Deteniendo...")
         finally:
-            self.connection.disconnect()
+            self._disconnect_all()
 
 def main():
     parser = argparse.ArgumentParser(description='Monitor iNews Multi-Rundown')
