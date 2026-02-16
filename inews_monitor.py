@@ -26,6 +26,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from io import StringIO
+import io
+
+# Force UTF-8 for stdout/stderr to avoid crashes with emojis on Windows
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
 class INewsConnection:
@@ -403,7 +410,80 @@ class StoryParser:
 
 
 import shutil
+import subprocess
 import importlib.util
+
+def _robust_rmtree(path: str, logger=None) -> bool:
+    """
+    Elimina un directorio de forma robusta, manejando errores de permisos.
+    Intenta múltiples métodos si el primero falla.
+    
+    Returns:
+        True si se eliminó correctamente, False si falló
+    """
+    import stat
+    
+    def handle_remove_readonly(func, path, exc_info):
+        """Handler para errores de permisos en shutil.rmtree"""
+        # Si es error de permisos, intentar quitar readonly y reintentar
+        if exc_info[0] == PermissionError:
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except:
+                pass
+    
+    # Método 1: shutil.rmtree con handler de errores
+    try:
+        shutil.rmtree(path, onerror=handle_remove_readonly)
+        if not os.path.exists(path):
+            return True
+    except Exception as e:
+        if logger:
+            logger.debug(f"shutil.rmtree falló para {path}: {e}")
+    
+    # Método 2: Usar cmd rmdir /s /q (Windows)
+    if os.name == 'nt':
+        try:
+            result = subprocess.run(
+                ['cmd', '/c', 'rmdir', '/s', '/q', path],
+                capture_output=True,
+                timeout=30
+            )
+            if not os.path.exists(path):
+                return True
+        except Exception as e:
+            if logger:
+                logger.debug(f"cmd rmdir falló para {path}: {e}")
+        
+        # Método 3: takeown + icacls + rmdir (requiere permisos)
+        try:
+            subprocess.run(
+                ['takeown', '/f', path, '/r', '/d', 'y'],
+                capture_output=True,
+                timeout=30
+            )
+            subprocess.run(
+                ['icacls', path, '/grant', f'{os.environ.get("USERNAME", "Everyone")}:F', '/t'],
+                capture_output=True,
+                timeout=30
+            )
+            subprocess.run(
+                ['cmd', '/c', 'rmdir', '/s', '/q', path],
+                capture_output=True,
+                timeout=30
+            )
+            if not os.path.exists(path):
+                return True
+        except Exception as e:
+            if logger:
+                logger.debug(f"takeown/icacls falló para {path}: {e}")
+    
+    # Si llegamos aquí, no pudimos eliminar
+    if logger:
+        logger.warning(f"No se pudo eliminar carpeta: {path}")
+    return False
+
 
 class ContentManager:
     """Gestiona la descarga y limpieza de contenido multimedia de Twitter."""
@@ -426,13 +506,24 @@ class ContentManager:
     def _load_twitter_scraper_class(self):
         """Carga la clase TweetScraper desde la ruta configurada."""
         scripts_path = self.config.get("content", {}).get("scripts_twitter_path")
+        
+        # Fallback: intentar buscar ScriptsTwitter en el directorio actual si la config falla
         if not scripts_path or not os.path.exists(scripts_path):
-            self.logger.warning(f"Ruta de scripts Twitter no válida: {scripts_path}")
-            return None
+            local_scripts = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ScriptsTwitter")
+            if os.path.exists(local_scripts):
+                self.logger.warning(f"Ruta config no válida ({scripts_path}), usando local: {local_scripts}")
+                scripts_path = local_scripts
+            else:
+                self.logger.error(f"Ruta de scripts Twitter no válida y no hallada localmente: {scripts_path}")
+                return None
             
         sys.path.append(scripts_path)
         try:
+            if scripts_path not in sys.path:
+                sys.path.append(scripts_path)
+            
             import scrape_tweet_api
+            print(f"[OK] Motor de descarga Twitter cargado correctamente.")
             
             # Definir la clase personalizada heredando de la importada
             class CustomTweetScraper(scrape_tweet_api.TweetScraper):
@@ -446,7 +537,7 @@ class ContentManager:
                     """Sobrescribe run para personalizar paths y JSON."""
                     tweet_id = self.extract_tweet_id(tweet_url)
                     if not tweet_id:
-                        print("❌ No se pudo extraer ID")
+                        print(f"[X] No se pudo extraer ID")
                         return
 
                     try:
@@ -505,7 +596,7 @@ class ContentManager:
                                 full_downloaded_path = os.path.join(self.temp_folder_video, downloaded_video)
                                 self.convertir_a_25fps(full_downloaded_path, video_final_path)
                                 data["tweet_video"] = abs_video
-                                print(f"✅ Video guardado: {abs_video}")
+                                print(f"[OK] Video guardado: {abs_video}")
 
                         # Eliminar has_video si no se quiere en JSON final o dejarlo
                         if "has_video" in data: del data["has_video"]
@@ -528,16 +619,31 @@ class ContentManager:
                         # Guardar JSON
                         json_path = os.path.join(self.output_dir, "tweet_api.json")
                         self.save_to_json(data, json_path)
-                        print(f"✅ JSON guardado en: {json_path}")
+                        print(f"[OK] JSON guardado en: {json_path}")
                         
                         # Limpiar temp video
                         try: shutil.rmtree(self.temp_folder_video)
                         except: pass
 
+                        # FINALMENTE: Asegurar permisos para todos los archivos generados
+                        self._grant_permissions(tweet_dir)
+
                     except Exception as e:
-                        print(f"❌ Error procesando tweet {tweet_id}: {e}")
+                        print(f"[X] Error procesando tweet {tweet_id}: {e}")
                         import traceback
                         traceback.print_exc()
+
+                def _grant_permissions(self, path: str):
+                    """Otorga control total a Everyone/Todos sobre la carpeta y su contenido."""
+                    try:
+                        # Intentar grupo en Inglés
+                        subprocess.run(['icacls', path, '/grant', 'Everyone:F', '/t', '/c', '/q'], 
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        # Intentar grupo en Español
+                        subprocess.run(['icacls', path, '/grant', 'Todos:F', '/t', '/c', '/q'], 
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception as e:
+                        print(f"⚠️ Warning: No se pudieron establecer permisos explícitos: {e}")
 
             return CustomTweetScraper
             
@@ -606,7 +712,8 @@ class ContentManager:
                     if os.path.exists(folder_path):
                         try:
                             self.logger.info(f"Eliminando carpeta obsoleta: {folder_path}")
-                            shutil.rmtree(folder_path)
+                            if not _robust_rmtree(folder_path, self.logger):
+                                self.logger.error(f"No se pudo eliminar carpeta {folder_path}")
                         except Exception as e:
                             self.logger.error(f"Error eliminando carpeta {folder_path}: {e}")
                 
@@ -636,7 +743,9 @@ class ContentManager:
                     
                     # Verificar si existe para no meter basura (opcional, pero recomendable)
                     if os.path.exists(json_path):
-                        writer.writerow([url, abs_json_path])
+                        # Usar el directorio padre (carpeta del tweet) en lugar del archivo json
+                        abs_folder_path = os.path.dirname(abs_json_path)
+                        writer.writerow([url, abs_folder_path])
             
             self.logger.info(f"Índice maestro actualizado: {index_file}")
         except Exception as e:
@@ -705,9 +814,47 @@ class RundownWatcher:
         filtered_results = []
         current_urls = []
         
+        # Nombres especiales de iNews que no son stories válidas
+        INVALID_STORY_NAMES = {'ibc', 'data', 'metadata', 'locator', 'info'}
+        
+        def is_valid_story_name(name: str) -> bool:
+            """Verifica si un nombre parece ser una story válida de iNews."""
+            # Nombres vacíos o muy cortos (1-2 caracteres como 't', 'f', 'a')
+            if not name or len(name) <= 2:
+                return False
+            
+            # Nombres que empiezan por '.'
+            if name.startswith('.'):
+                return False
+            
+            # Nombres conocidos del sistema
+            if name.lower() in INVALID_STORY_NAMES:
+                return False
+            
+            # Nombres con / o \ (rutas como 'a/b')
+            if '/' in name or '\\' in name:
+                return False
+            
+            # Patrones linX (lin1, lin2, etc.)
+            if re.match(r'^lin\d+$', name.lower()):
+                return False
+            
+            # Nombres con caracteres no alfanuméricos (como '???')
+            # Las stories válidas suelen ser alfanuméricas con guiones/underscores/dos puntos
+            if not re.match(r'^[\w\-\s:]+$', name):
+                return False
+            
+            
+            
+            return True
+        
         for entry in entries:
             entry_name = entry.get("name", "")
             if not entry_name or entry.get("is_dir", False):
+                continue
+            
+            # Filtrar entradas que no son stories válidas
+            if not is_valid_story_name(entry_name):
                 continue
             
             content = self.connection.read_story(entry_name)
@@ -739,9 +886,10 @@ class RundownWatcher:
                 }
                 filtered_results.append(result)
         
-        with self._lock:
-            self.active_urls = current_urls
-            self.has_run = True
+                filtered_results.append(result)
+        
+        self.active_urls = current_urls
+        self.has_run = True
         return filtered_results
 
 
