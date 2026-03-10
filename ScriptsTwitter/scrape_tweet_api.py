@@ -5,6 +5,7 @@ import re
 import logging
 import argparse
 import subprocess
+import shutil
 from typing import Optional, Dict, List, Tuple, Any
 
 import requests
@@ -57,7 +58,7 @@ class TweetScraper:
         url = f"https://api.twitter.com/2/tweets/{tweet_id}"
         params = {
             "expansions": "author_id,attachments.media_keys",
-            "tweet.fields": "created_at,text",
+            "tweet.fields": "created_at,text,note_tweet",
             "user.fields": "name,username,profile_image_url",
             "media.fields": "url,type"
         }
@@ -104,7 +105,9 @@ class TweetScraper:
         # Obtener imagen de perfil en mayor resolución
         profile_image_hd = re.sub(r'_normal(\.\w+)$', r'_400x400\1', profile_image_url)
         
-        text = tweet.get("text", "").strip()
+        note_tweet = tweet.get("note_tweet", {})
+        full_text = note_tweet.get("text") if isinstance(note_tweet, dict) else ""
+        text = (full_text or tweet.get("text", "")).strip()
         # Limpiezas básicas de texto
         text = re.sub(r'^(?:@\w+\s*)+', '', text).strip()
         text = re.sub(r'https://t\.co/\S+', '', text).strip()
@@ -154,20 +157,76 @@ class TweetScraper:
         except Exception as e:
             logger.error(f"❌ Error al descargar el video: {e}")
 
+    def _parse_fps(self, value: str) -> Optional[float]:
+        """Convierte un valor de fps tipo '30000/1001' a float."""
+        if not value:
+            return None
+        try:
+            if "/" in value:
+                num, den = value.split("/", 1)
+                den_f = float(den)
+                if den_f == 0:
+                    return None
+                return float(num) / den_f
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+    def _probe_video(self, input_path: str) -> Tuple[Optional[float], str]:
+        """Obtiene fps y formato contenedor usando ffprobe."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+                    "-show_entries", "format=format_name",
+                    "-of", "json",
+                    input_path
+                ],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            payload = json.loads(result.stdout or "{}")
+            stream = (payload.get("streams") or [{}])[0]
+            format_name = (payload.get("format") or {}).get("format_name", "")
+            fps_expr = stream.get("avg_frame_rate") or stream.get("r_frame_rate") or ""
+            fps = self._parse_fps(fps_expr)
+            return fps, format_name
+        except Exception as e:
+            logger.debug(f"No se pudo analizar video con ffprobe ({input_path}): {e}")
+            return None, ""
+
     def convertir_a_25fps(self, input_path: str, output_path: str):
-        """Convierte el video a 25 fps usando ffmpeg."""
+        """
+        Convierte el video a 25 fps usando ffmpeg solo si es necesario.
+        Si ya está en MP4 a 25 fps, copia el archivo sin recodificar.
+        """
         try:
             # Verificar si ffmpeg está instalado
             subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            
+
+            fps, format_name = self._probe_video(input_path)
+            is_mp4 = input_path.lower().endswith(".mp4") or ("mp4" in (format_name or "").lower())
+            if fps is not None and abs(fps - 25.0) < 0.05 and is_mp4:
+                if os.path.abspath(input_path) != os.path.abspath(output_path):
+                    shutil.copy2(input_path, output_path)
+                logger.info("ℹ️ Video ya está en MP4 a 25 fps; se omite conversión.")
+                return True
+
             subprocess.run([
                 "ffmpeg", "-i", input_path, "-r", "25", "-y", output_path
             ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             logger.info("✅ Video convertido a 25 fps.")
+            return True
         except FileNotFoundError:
-             logger.error("❌ ffmpeg no encontrado. Asegúrate de tenerlo instalado y en el PATH.")
+            logger.error("❌ ffmpeg no encontrado. Asegúrate de tenerlo instalado y en el PATH.")
+            return False
         except Exception as e:
             logger.error(f"❌ Error al convertir video a 25 fps: {e}")
+            return False
 
     def extract_emojis(self, text: str) -> List[str]:
         """Extrae emojis únicos del texto."""
@@ -231,8 +290,10 @@ class TweetScraper:
                 
                 if downloaded_video:
                     full_downloaded_path = os.path.join(self.temp_folder_video, downloaded_video)
-                    self.convertir_a_25fps(full_downloaded_path, video_final_path)
-                    logger.info(f"✅ Video convertido y guardado en {video_final_path}")
+                    if self.convertir_a_25fps(full_downloaded_path, video_final_path):
+                        logger.info(f"✅ Video listo en {video_final_path}")
+                    else:
+                        logger.warning("⚠️ No se pudo preparar el video final a 25 fps.")
                 else:
                     logger.warning("⚠️ No se encontró el video descargado.")
             else:

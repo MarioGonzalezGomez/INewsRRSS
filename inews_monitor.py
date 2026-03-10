@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from io import StringIO
 import io
+import requests
 
 # Force UTF-8 for stdout/stderr to avoid crashes with emojis on Windows
 if sys.stdout.encoding != 'utf-8':
@@ -492,7 +493,13 @@ class ContentManager:
         self.config = config
         self.logger = logger
         self.download_base = config.get("content", {}).get("download_base_path", "Descargas")
+        raw_download_emojis = config.get("content", {}).get("download_emojis", True)
+        if isinstance(raw_download_emojis, str):
+            self.download_emojis = raw_download_emojis.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            self.download_emojis = bool(raw_download_emojis)
         self.state_file = os.path.join(self.download_base, "content_state.json")
+        self.logger.info(f"Descarga de emojis habilitada: {self.download_emojis}")
         
         # Cargar módulo de Twitter dinámicamente
         self.tweet_scraper_class = self._load_twitter_scraper_class()
@@ -527,12 +534,135 @@ class ContentManager:
             
             # Definir la clase personalizada heredando de la importada
             class CustomTweetScraper(scrape_tweet_api.TweetScraper):
-                def __init__(self, output_dir: str):
+                def __init__(self, output_dir: str, download_emojis: bool = True):
                     """Inicializa sin crear directorios aún (se crean por tweet)."""
+                    self.download_emojis = download_emojis
                     super().__init__(output_dir)
                     # No llamar a _setup_directories() aquí para evitar crear
                     # carpetas innecesarias en la raíz base
                 
+                def _setup_directories(self):
+                    """Crea directorios base, opcionalmente la carpeta de emojis."""
+                    os.makedirs(self.output_dir, exist_ok=True)
+                    os.makedirs(self.temp_folder_video, exist_ok=True)
+                    if self.download_emojis:
+                        os.makedirs(self.emojis_dir, exist_ok=True)
+
+                def get_tweet_data(self, tweet_id: str) -> Dict:
+                    """
+                    Fuerza la solicitud del campo note_tweet para obtener texto completo
+                    en tweets largos (evita truncado en data.text).
+                    """
+                    url = f"https://api.twitter.com/2/tweets/{tweet_id}"
+                    params = {
+                        "expansions": "author_id,attachments.media_keys",
+                        "tweet.fields": "created_at,text,note_tweet",
+                        "user.fields": "name,username,profile_image_url",
+                        "media.fields": "url,type"
+                    }
+                    headers = {"Authorization": f"Bearer {self.bearer_token}"}
+                    response = requests.get(url, params=params, headers=headers)
+                    if response.status_code != 200:
+                        raise Exception(f"Error {response.status_code}: {response.text}")
+                    return response.json()
+
+                def extract_relevant_data(self, json_data: Dict) -> Dict:
+                    """
+                    Mantiene la logica base, pero prioriza note_tweet.text cuando existe.
+                    """
+                    data = super().extract_relevant_data(json_data)
+                    tweet = json_data.get("data", {})
+                    note_tweet = tweet.get("note_tweet", {})
+                    full_text = note_tweet.get("text") if isinstance(note_tweet, dict) else ""
+
+                    if full_text:
+                        text = full_text.strip()
+                        text = re.sub(r'^(?:@\w+\s*)+', '', text).strip()
+                        text = re.sub(r'https://t\.co/\S+', '', text).strip()
+                        text, texto_traducido = self.traducir_texto(text)
+                        data["text"] = text
+                        data["text_traducido"] = texto_traducido
+
+                    return data
+
+                def _parse_fps(self, value: str) -> Optional[float]:
+                    """Convierte un valor de fps tipo '30000/1001' a float."""
+                    if not value:
+                        return None
+                    try:
+                        if "/" in value:
+                            num, den = value.split("/", 1)
+                            den_f = float(den)
+                            if den_f == 0:
+                                return None
+                            return float(num) / den_f
+                        return float(value)
+                    except (ValueError, TypeError):
+                        return None
+
+                def _probe_video(self, input_path: str) -> Tuple[Optional[float], str]:
+                    """Obtiene fps y formato contenedor usando ffprobe."""
+                    try:
+                        result = subprocess.run(
+                            [
+                                "ffprobe",
+                                "-v", "error",
+                                "-select_streams", "v:0",
+                                "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+                                "-show_entries", "format=format_name",
+                                "-of", "json",
+                                input_path
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=True
+                        )
+                        payload = json.loads(result.stdout or "{}")
+                        stream = (payload.get("streams") or [{}])[0]
+                        format_name = (payload.get("format") or {}).get("format_name", "")
+                        fps_expr = stream.get("avg_frame_rate") or stream.get("r_frame_rate") or ""
+                        fps = self._parse_fps(fps_expr)
+                        return fps, format_name
+                    except Exception as e:
+                        print(f"[i] No se pudo analizar video con ffprobe ({input_path}): {e}")
+                        return None, ""
+
+                def convertir_a_25fps(self, input_path: str, output_path: str) -> bool:
+                    """
+                    Convierte el video a 25 fps solo si es necesario.
+                    Si ya está en MP4 a 25 fps, copia el archivo directamente.
+                    """
+                    try:
+                        subprocess.run(
+                            ["ffmpeg", "-version"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=True
+                        )
+
+                        fps, format_name = self._probe_video(input_path)
+                        is_mp4 = input_path.lower().endswith(".mp4") or ("mp4" in (format_name or "").lower())
+                        if fps is not None and abs(fps - 25.0) < 0.05 and is_mp4:
+                            if os.path.abspath(input_path) != os.path.abspath(output_path):
+                                shutil.copy2(input_path, output_path)
+                            print("[i] Video ya está en MP4 a 25 fps; se omite conversión.")
+                            return True
+
+                        subprocess.run(
+                            ["ffmpeg", "-i", input_path, "-r", "25", "-y", output_path],
+                            check=True,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                        print("[OK] Video convertido a 25 fps.")
+                        return True
+                    except FileNotFoundError:
+                        print("[X] ffmpeg no encontrado en PATH.")
+                        return False
+                    except Exception as e:
+                        print(f"[X] Error al convertir video a 25 fps: {e}")
+                        return False
+
                 def run(self, tweet_url: str):
                     """Sobrescribe run para personalizar paths y JSON."""
                     tweet_id = self.extract_tweet_id(tweet_url)
@@ -594,27 +724,30 @@ class ContentManager:
                             
                             if downloaded_video:
                                 full_downloaded_path = os.path.join(self.temp_folder_video, downloaded_video)
-                                self.convertir_a_25fps(full_downloaded_path, video_final_path)
-                                data["tweet_video"] = abs_video
-                                print(f"[OK] Video guardado: {abs_video}")
+                                if self.convertir_a_25fps(full_downloaded_path, video_final_path) and os.path.exists(video_final_path):
+                                    data["tweet_video"] = abs_video
+                                    print(f"[OK] Video guardado: {abs_video}")
+                                else:
+                                    print(f"[X] No se pudo preparar el video final: {video_final_path}")
 
                         # Eliminar has_video si no se quiere en JSON final o dejarlo
                         if "has_video" in data: del data["has_video"]
 
                         # Emojis (Lógica igual, rutas relativas dentro de carpeta tweet)
-                        text_emojis = self.extract_emojis(data.get("text", ""))
-                        name_emojis = self.extract_emojis(data.get("name", ""))
-                        emojis = list(dict.fromkeys(text_emojis + name_emojis))
-                        emoji_map = {emoji: f"\\oemj {i+1};" for i, emoji in enumerate(emojis)}
+                        if self.download_emojis:
+                            text_emojis = self.extract_emojis(data.get("text", ""))
+                            name_emojis = self.extract_emojis(data.get("name", ""))
+                            emojis = list(dict.fromkeys(text_emojis + name_emojis))
+                            emoji_map = {emoji: f"\\oemj {i+1};" for i, emoji in enumerate(emojis)}
 
-                        for idx, emoji_char in enumerate(emojis, start=1):
-                            filename = f"emoji{idx}.png"
-                            filepath = os.path.join(self.emojis_dir, filename)
-                            self.download_emoji(emoji_char, filepath)
+                            for idx, emoji_char in enumerate(emojis, start=1):
+                                filename = f"emoji{idx}.png"
+                                filepath = os.path.join(self.emojis_dir, filename)
+                                self.download_emoji(emoji_char, filepath)
 
-                        if "text" in data: data["text"] = self.replace_emojis_with_oemj(data["text"], emoji_map)
-                        if "name" in data: data["name"] = self.replace_emojis_with_oemj(data["name"], emoji_map)
-                        if "text_traducido" in data: data["text_traducido"] = self.replace_emojis_with_oemj(data["text_traducido"], emoji_map)
+                            if "text" in data: data["text"] = self.replace_emojis_with_oemj(data["text"], emoji_map)
+                            if "name" in data: data["name"] = self.replace_emojis_with_oemj(data["name"], emoji_map)
+                            if "text_traducido" in data: data["text_traducido"] = self.replace_emojis_with_oemj(data["text_traducido"], emoji_map)
 
                         # Guardar JSON
                         json_path = os.path.join(self.output_dir, "tweet_api.json")
@@ -689,7 +822,10 @@ class ContentManager:
             for url in new_urls:
                 try:
                     # Crear nueva instancia para cada URL para evitar anidamiento
-                    scraper = self.tweet_scraper_class(output_dir=self.download_base)
+                    scraper = self.tweet_scraper_class(
+                        output_dir=self.download_base,
+                        download_emojis=self.download_emojis
+                    )
                     self.logger.info(f"Descargando contenido para: {url}")
                     # Extraer ID para guardar en estado
                     tweet_id = scraper.extract_tweet_id(url)
@@ -906,6 +1042,7 @@ class INewsMonitor:
         self._setup_logging()
         
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._configure_story_parser()
         self.content_manager = ContentManager(self.config, self.logger)
         
         # Paralelismo configurable (default 5 hilos, máximo razonable para FTP)
@@ -922,6 +1059,23 @@ class INewsMonitor:
         self._print_lock = threading.Lock()
         
         self.running = False
+
+    def _configure_story_parser(self):
+        """
+        Carga los tipos de rotulo validos desde config y los aplica al parser global.
+        Si la config no trae un valor usable, conserva el valor por defecto del codigo.
+        """
+        monitor_config = self.config.get("monitor", {})
+        configured_types = monitor_config.get("tipos_rotulo_validos")
+
+        if isinstance(configured_types, list):
+            cleaned_types = [str(t).strip() for t in configured_types if str(t).strip()]
+            if cleaned_types:
+                StoryParser.TIPOS_VALIDOS = cleaned_types
+                self.logger.info(f"Tipos de rotulo validos (config): {StoryParser.TIPOS_VALIDOS}")
+                return
+
+        self.logger.info(f"Tipos de rotulo validos (default): {StoryParser.TIPOS_VALIDOS}")
         
     def _load_config(self) -> Dict:
         try:
