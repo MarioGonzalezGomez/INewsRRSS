@@ -1,39 +1,29 @@
 @echo off
-setlocal enabledelayedexpansion
+REM ============================================
+REM  iNews Monitor - Panel de Control
+REM  Inicia el servidor web y abre el navegador
+REM ============================================
 
-REM =============================================
-REM  Panel de Control - iNews Monitor
-REM  Abre un servidor web en el puerto 8080
-REM  para gestionar perfiles y monitores
-REM =============================================
-
-REM Cambiar al directorio del script
 cd /d "%~dp0"
 
-REM Intenta usar el entorno virtual local
-if exist "env\Scripts\python.exe" (
-    echo Usando Python del entorno virtual local...
-    set PYTHON_PATH=env\Scripts\python.exe
-) else (
-    echo Entorno virtual no encontrado. Buscando Python en el PATH del sistema...
-    for /f "tokens=*" %%i in ('where python 2^>nul') do set PYTHON_PATH=%%i
-    
-    if "!PYTHON_PATH!"=="" (
-        echo.
-        echo ERROR: No se encontro Python en el sistema.
-        echo.
-        pause
-        exit /b 1
-    )
+REM Activar entorno virtual si existe
+if exist "venv\Scripts\activate.bat" (
+    call venv\Scripts\activate.bat
 )
 
+set PORT=8080
+
 echo.
-echo ======================================================
+echo ============================================
 echo   iNews Monitor - Panel de Control
-echo   Abriendo en http://localhost:8080
-echo ======================================================
+echo   Abriendo http://localhost:%PORT%
+echo ============================================
 echo.
 
-start http://localhost:8080
-"!PYTHON_PATH!" control_panel.py %*
+REM Abrir el navegador tras un breve delay (para que el server arranque)
+start "" cmd /c "timeout /t 2 /nobreak >nul && start http://localhost:%PORT%"
+
+REM Iniciar el servidor (bloquea hasta Ctrl+C)
+python control_panel.py --port %PORT%
+
 pause

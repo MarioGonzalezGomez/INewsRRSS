@@ -1,13 +1,25 @@
 {
     "name": "Territorial",
     "monitors": [
-        { "name": "MADRID-1", "rundown_path": "INF-DIGITAL/.DIARIOS/.MADRID/.MINUTADO", "interval_seconds": 45, "active": true },
-        { "name": "MADRID-2", "rundown_path": "INF-DIGITAL/.DIARIOS/.MADRID/.MINUTADO2", "interval_seconds": 45, "active": true }
+        {
+            "name": "MADRID-1",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.MADRID/.MINUTADO",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "MADRID-2",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.MADRID/.MINUTADO2",
+            "interval_seconds": 45,
+            "active": true
+        }
     ],
     "monitor": {
         "ap_filter": "",
         "max_workers": 2,
-        "tipos_rotulo_validos": ["X_Total"]
+        "tipos_rotulo_validos": [
+            "x_TotalV2"
+        ]
     },
     "content": {
         "download_base_path": "\\\\172.28.51.53\\Territorial",

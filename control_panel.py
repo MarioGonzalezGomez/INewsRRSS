@@ -28,12 +28,17 @@ def get_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 def load_config():
-    config_path = os.path.join(get_base_dir(), "config.json")
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    config_path = os.path.join(get_base_dir(), "panel_state.json")
+    if not os.path.exists(config_path):
+        return {"profiles_dir": "profiles", "active_profiles": []}
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {"profiles_dir": "profiles", "active_profiles": []}
 
 def save_config(config):
-    config_path = os.path.join(get_base_dir(), "config.json")
+    config_path = os.path.join(get_base_dir(), "panel_state.json")
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -294,10 +299,11 @@ HTML_PAGE = """<!DOCTYPE html>
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 1.2rem;
+            font-size: 0.9rem;
             font-weight: 700;
             background: var(--accent-glow);
             color: var(--accent);
+            text-align: center;
         }
 
         .profile-card.active .profile-icon {
@@ -498,6 +504,188 @@ HTML_PAGE = """<!DOCTYPE html>
         .toast.success { border-left: 3px solid var(--green); }
         .toast.error { border-left: 3px solid var(--red); }
 
+        .interval-input {
+            width: 52px;
+            padding: 2px 6px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-secondary);
+            font-family: 'Courier New', monospace;
+            font-size: 0.72rem;
+            text-align: center;
+            transition: all 0.2s;
+            -moz-appearance: textfield;
+        }
+
+        .interval-input::-webkit-outer-spin-button,
+        .interval-input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .interval-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            color: var(--text-primary);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .interval-input:hover { border-color: var(--border-light); }
+
+        .interval-suffix {
+            font-size: 0.68rem;
+            color: var(--text-muted);
+            margin-left: 2px;
+        }
+
+        .tags-editor {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 8px 3px 10px;
+            background: var(--accent-glow);
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            border-radius: 16px;
+            font-size: 0.72rem;
+            font-weight: 500;
+            color: var(--accent-hover);
+            transition: all 0.2s;
+        }
+
+        .tag:hover {
+            background: rgba(99, 102, 241, 0.22);
+            border-color: var(--accent);
+        }
+
+        .tag-remove {
+            cursor: pointer;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.6rem;
+            color: var(--text-muted);
+            transition: all 0.2s;
+            background: transparent;
+            border: none;
+            line-height: 1;
+            padding: 0;
+        }
+
+        .tag-remove:hover {
+            background: var(--red-bg);
+            color: var(--red);
+        }
+
+        .tag-add-form {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .tag-input {
+            width: 110px;
+            padding: 3px 8px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 0.72rem;
+            transition: all 0.2s;
+        }
+
+        .tag-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .tag-input::placeholder { color: var(--text-muted); }
+
+        .tag-add-btn {
+            padding: 3px 8px;
+            background: var(--accent-glow);
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            border-radius: 16px;
+            color: var(--accent);
+            cursor: pointer;
+            font-size: 0.72rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .tag-add-btn:hover {
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .detail-block {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .detail-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .worker-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .worker-input {
+            width: 52px;
+            padding: 4px 8px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-align: center;
+            transition: all 0.2s;
+            -moz-appearance: textfield;
+        }
+
+        .worker-input::-webkit-outer-spin-button,
+        .worker-input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .worker-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .worker-hint {
+            font-size: 0.7rem;
+            padding: 3px 8px;
+            background: var(--yellow-bg);
+            color: var(--yellow);
+            border-radius: 10px;
+            font-weight: 500;
+        }
+
         @media (max-width: 768px) {
             .container { padding: 16px; }
             .header { padding: 16px; }
@@ -584,14 +772,19 @@ HTML_PAGE = """<!DOCTYPE html>
         function renderProfiles() {
             const grid = document.getElementById('profileGrid');
             grid.innerHTML = profiles.map(p => {
-                const initial = (p.name || p.id)[0].toUpperCase();
+                const initialsMap = {'24H':'24H', 'TD':'TD', 'Especiales':'E', 'Terri':'T'};
+                const initial = initialsMap[p.id] || (p.name || p.id)[0].toUpperCase();
                 const monitors = (p.monitors || []).map((m, idx) => {
                     const isActive = m.active !== false;
                     return `
                         <div class="monitor-item ${isActive ? 'active-monitor' : 'inactive-monitor'}">
                             <div>
                                 <div class="monitor-name">${m.name || 'Monitor ' + (idx+1)}</div>
-                                <div class="monitor-interval">${m.interval_seconds || 30}s</div>
+                                <div class="monitor-interval">
+                                    <input type="number" class="interval-input" value="${m.interval_seconds || 30}" min="5" max="3600"
+                                        onchange="updateInterval('${p.id}', ${idx}, this.value)"
+                                        title="Intervalo de refresco en segundos"><span class="interval-suffix">seg</span>
+                                </div>
                             </div>
                             <label class="toggle" title="${isActive ? 'Desactivar' : 'Activar'} monitor">
                                 <input type="checkbox" ${isActive ? 'checked' : ''}
@@ -629,9 +822,32 @@ HTML_PAGE = """<!DOCTYPE html>
                             </div>
                         </div>
                         <div class="profile-details">
-                            <div class="detail-item"><strong>Ruta descarga:</strong> ${p.download_path || '-'}</div>
-                            <div class="detail-item"><strong>Workers:</strong> ${p.max_workers || '-'}</div>
-                            <div class="detail-item"><strong>Tipos rótulo:</strong> ${tipos || '-'}</div>
+                            <div class="detail-block">
+                                <div class="detail-label">Ruta descarga</div>
+                                <div class="detail-item">${p.download_path || '-'}</div>
+                            </div>
+                            <div class="detail-block">
+                                <div class="detail-label">Workers</div>
+                                <div class="worker-group">
+                                    <input type="number" class="worker-input" value="${p.max_workers || 2}" min="1" max="20"
+                                        onchange="updateWorkers('${p.id}', this.value)"
+                                        title="Número de workers concurrentes">
+                                    <span class="worker-hint">rec: ${getRecommendedWorkers(p)}</span>
+                                </div>
+                            </div>
+                            <div class="detail-block" style="flex-basis: 100%;">
+                                <div class="detail-label">Tipos de rótulo válidos</div>
+                                <div class="tags-editor">
+                                    ${(p.tipos_rotulo || []).map((t, i) => `
+                                        <span class="tag">${t}<button class="tag-remove" onclick="removeTipoRotulo('${p.id}', ${i})" title="Eliminar">✕</button></span>
+                                    `).join('')}
+                                    <span class="tag-add-form">
+                                        <input type="text" class="tag-input" id="tagInput_${p.id}" placeholder="Nuevo tipo..."
+                                            onkeydown="if(event.key==='Enter'){addTipoRotulo('${p.id}')}">
+                                        <button class="tag-add-btn" onclick="addTipoRotulo('${p.id}')" title="Añadir tipo">+ Añadir</button>
+                                    </span>
+                                </div>
+                            </div>
                         </div>
                         <div class="monitors-section">
                             <div class="monitors-title">
@@ -674,6 +890,70 @@ HTML_PAGE = """<!DOCTYPE html>
             try {
                 await api('POST', `/profiles/${profileId}/monitors/all`, { active });
                 showToast(`Todos los monitores ${active ? 'activados' : 'desactivados'}`);
+                await loadProfiles();
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+                await loadProfiles();
+            }
+        }
+
+        function getRecommendedWorkers(profile) {
+            const active = (profile.monitors || []).filter(m => m.active !== false).length;
+            return Math.max(2, Math.min(10, Math.ceil(active / 2)));
+        }
+
+        async function updateInterval(profileId, monitorIdx, value) {
+            const seconds = parseInt(value);
+            if (isNaN(seconds) || seconds < 5) {
+                showToast('El intervalo mínimo es 5 segundos', 'error');
+                await loadProfiles();
+                return;
+            }
+            try {
+                await api('POST', `/profiles/${profileId}/monitors/${monitorIdx}/interval`, { interval_seconds: seconds });
+                showToast(`Intervalo actualizado a ${seconds}s`);
+                await loadProfiles();
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+                await loadProfiles();
+            }
+        }
+
+        async function addTipoRotulo(profileId) {
+            const input = document.getElementById('tagInput_' + profileId);
+            const tipo = (input.value || '').trim();
+            if (!tipo) { showToast('Escribe un tipo de rótulo', 'error'); return; }
+            try {
+                await api('POST', `/profiles/${profileId}/tipos_rotulo`, { action: 'add', tipo });
+                showToast(`Tipo "${tipo}" añadido`);
+                await loadProfiles();
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+                await loadProfiles();
+            }
+        }
+
+        async function removeTipoRotulo(profileId, index) {
+            try {
+                await api('POST', `/profiles/${profileId}/tipos_rotulo`, { action: 'remove', index });
+                showToast('Tipo eliminado');
+                await loadProfiles();
+            } catch (e) {
+                showToast('Error: ' + e.message, 'error');
+                await loadProfiles();
+            }
+        }
+
+        async function updateWorkers(profileId, value) {
+            const workers = parseInt(value);
+            if (isNaN(workers) || workers < 1) {
+                showToast('Mínimo 1 worker', 'error');
+                await loadProfiles();
+                return;
+            }
+            try {
+                await api('POST', `/profiles/${profileId}/workers`, { max_workers: workers });
+                showToast(`Workers actualizado a ${workers}`);
                 await loadProfiles();
             } catch (e) {
                 showToast('Error: ' + e.message, 'error');
@@ -777,6 +1057,39 @@ class ControlPanelHandler(BaseHTTPRequestHandler):
                         save_config(config)
                     self._send_json({"ok": True, "active_profiles": active})
                     return
+                
+                elif action == 'tipos_rotulo':
+                    body = self._read_body()
+                    profile = load_profile(profile_id)
+                    if "monitor" not in profile:
+                        profile["monitor"] = {}
+                    tipos = profile["monitor"].get("tipos_rotulo_validos", [])
+                    
+                    act = body.get("action")
+                    if act == "add":
+                        tipo = body.get("tipo", "").strip()
+                        if tipo and tipo not in tipos:
+                            tipos.append(tipo)
+                    elif act == "remove":
+                        idx = body.get("index", -1)
+                        if 0 <= idx < len(tipos):
+                            tipos.pop(idx)
+                    
+                    profile["monitor"]["tipos_rotulo_validos"] = tipos
+                    save_profile(profile_id, profile)
+                    self._send_json({"ok": True, "tipos_rotulo_validos": tipos})
+                    return
+                
+                elif action == 'workers':
+                    body = self._read_body()
+                    workers = int(body.get("max_workers", 5))
+                    profile = load_profile(profile_id)
+                    if "monitor" not in profile:
+                        profile["monitor"] = {}
+                    profile["monitor"]["max_workers"] = workers
+                    save_profile(profile_id, profile)
+                    self._send_json({"ok": True, "max_workers": workers})
+                    return
             
             # POST /api/profiles/<id>/monitors/<idx>/toggle
             if (len(parts) == 7 and parts[1] == 'api' and parts[2] == 'profiles' 
@@ -790,6 +1103,24 @@ class ControlPanelHandler(BaseHTTPRequestHandler):
                 monitors = profile.get("monitors", [])
                 if 0 <= monitor_idx < len(monitors):
                     monitors[monitor_idx]["active"] = active
+                    save_profile(profile_id, profile)
+                    self._send_json({"ok": True})
+                else:
+                    self._send_json({"error": "Monitor index out of range"}, 400)
+                return
+            
+            # POST /api/profiles/<id>/monitors/<idx>/interval
+            if (len(parts) == 7 and parts[1] == 'api' and parts[2] == 'profiles'
+                    and parts[4] == 'monitors' and parts[6] == 'interval'):
+                profile_id = parts[3]
+                monitor_idx = int(parts[5])
+                body = self._read_body()
+                interval = int(body.get("interval_seconds", 30))
+                
+                profile = load_profile(profile_id)
+                monitors = profile.get("monitors", [])
+                if 0 <= monitor_idx < len(monitors):
+                    monitors[monitor_idx]["interval_seconds"] = max(5, interval)
                     save_profile(profile_id, profile)
                     self._send_json({"ok": True})
                 else:

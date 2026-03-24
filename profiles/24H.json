@@ -1,27 +1,109 @@
 {
     "name": "24 Horas",
     "monitors": [
-        { "name": "EMISION_A", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION-A", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_B", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION-B", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_07H", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_07H", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_08H", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_08H", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_09H", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_09H", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_10H", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_10H", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_11H", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_11H", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_12H", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_12H", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_13H", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_13H", "interval_seconds": 45, "active": true },
-        { "name": "EMISION_14H", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_14H", "interval_seconds": 45, "active": true },
-        { "name": "TARDE_1", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.TARDE-24H/.MINUTADO-1", "interval_seconds": 45, "active": true },
-        { "name": "TARDE_2", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.TARDE-24H/.MINUTADO-2", "interval_seconds": 45, "active": true },
-        { "name": "TARDE_3", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.TARDE-24H/.MINUTADO-3", "interval_seconds": 45, "active": true },
-        { "name": "TARDE_4", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.TARDE-24H/.MINUTADO-4", "interval_seconds": 45, "active": true },
-        { "name": "NOCHE", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.NOCHE-24H/.MINUTADO", "interval_seconds": 45, "active": true },
-        { "name": "A3", "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_A3", "interval_seconds": 45, "active": true }
+        {
+            "name": "EMISION_A",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION-A",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_B",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION-B",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_07H",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_07H",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_08H",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_08H",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_09H",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_09H",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_10H",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_10H",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_11H",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_11H",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_12H",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_12H",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_13H",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_13H",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "EMISION_14H",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_14H",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "TARDE_1",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.TARDE-24H/.MINUTADO-1",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "TARDE_2",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.TARDE-24H/.MINUTADO-2",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "TARDE_3",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.TARDE-24H/.MINUTADO-3",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "TARDE_4",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.TARDE-24H/.MINUTADO-4",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "NOCHE",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.NOCHE-24H/.MINUTADO",
+            "interval_seconds": 45,
+            "active": true
+        },
+        {
+            "name": "A3",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.24H/.EMISIONES/.EMISION_A3",
+            "interval_seconds": 45,
+            "active": true
+        }
     ],
     "monitor": {
         "ap_filter": "",
         "max_workers": 10,
-        "tipos_rotulo_validos": ["X_Total"]
+        "tipos_rotulo_validos": [
+            "X_TotalV2"
+        ]
     },
     "content": {
         "download_base_path": "\\\\172.28.51.53\\24h",
