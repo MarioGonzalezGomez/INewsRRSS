@@ -1,0 +1,28 @@
+{
+    "name": "Telediario",
+    "monitors": [
+        { "name": "AVANCES-FS", "rundown_path": "INF-DIGITAL/.DIARIOS/AVANCES-FS", "interval_seconds": 45, "active": true },
+        { "name": "AVANCES-MANANA", "rundown_path": "INF-DIGITAL/.DIARIOS/AVANCES-MANANA", "interval_seconds": 45, "active": true },
+        { "name": "AVANCES-TARDE", "rundown_path": "INF-DIGITAL/.DIARIOS/AVANCES-TARDE", "interval_seconds": 45, "active": true },
+        { "name": "MADRID-1", "rundown_path": "INF-DIGITAL/.DIARIOS/.MADRID/.MINUTADO", "interval_seconds": 45, "active": true },
+        { "name": "MADRID-2", "rundown_path": "INF-DIGITAL/.DIARIOS/.MADRID/.MINUTADO2", "interval_seconds": 45, "active": true },
+        { "name": "MATINAL-A", "rundown_path": "INF-DIGITAL/.DIARIOS/.MATINAL/.MINUTADO-A", "interval_seconds": 45, "active": true },
+        { "name": "MATINAL-B", "rundown_path": "INF-DIGITAL/.DIARIOS/.MATINAL/.MINUTADO-B", "interval_seconds": 45, "active": true },
+        { "name": "TD1", "rundown_path": "INF-DIGITAL/.DIARIOS/.TD1/.MINUTADO", "interval_seconds": 45, "active": true },
+        { "name": "TD2", "rundown_path": "INF-DIGITAL/.DIARIOS/.TD2/.MINUTADO", "interval_seconds": 45, "active": true },
+        { "name": "TFS1", "rundown_path": "INF-DIGITAL/.DIARIOS/.TFS1/.MINUTADO", "interval_seconds": 45, "active": true },
+        { "name": "TFS2", "rundown_path": "INF-DIGITAL/.DIARIOS/.TFS2/.MINUTADO", "interval_seconds": 45, "active": true },
+        { "name": "TFS3", "rundown_path": "INF-DIGITAL/.DIARIOS/.TFS3/.MINUTADO", "interval_seconds": 45, "active": true },
+        { "name": "TFS4", "rundown_path": "INF-DIGITAL/.DIARIOS/.TFS4/.MINUTADO", "interval_seconds": 45, "active": true }
+    ],
+    "monitor": {
+        "ap_filter": "",
+        "max_workers": 5,
+        "tipos_rotulo_validos": ["X_Total"]
+    },
+    "content": {
+        "download_base_path": "\\\\172.28.51.53\\td",
+        "cleaning_interval_seconds": 3600,
+        "download_emojis": false
+    }
+}

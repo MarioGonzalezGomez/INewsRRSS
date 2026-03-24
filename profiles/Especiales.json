@@ -1,0 +1,19 @@
+{
+    "name": "Especiales",
+    "monitors": [
+        { "name": "ELECCIONES-1", "rundown_path": "INF-DIGITAL/.ELECCIONES/.MINUTADO", "interval_seconds": 20, "active": true },
+        { "name": "ELECCIONES-2", "rundown_path": "INF-DIGITAL/.ELECCIONES/.MINUTADO2", "interval_seconds": 20, "active": true },
+        { "name": "ESPECIALES-EMERITO", "rundown_path": "INF-DIGITAL/.ESPECIALES/.EMERITO", "interval_seconds": 500, "active": true },
+        { "name": "ESPECIALES-FFAA", "rundown_path": "INF-DIGITAL/.ESPECIALES/.FFAA", "interval_seconds": 500, "active": true }
+    ],
+    "monitor": {
+        "ap_filter": "",
+        "max_workers": 2,
+        "tipos_rotulo_validos": ["X_TotalV2"]
+    },
+    "content": {
+        "download_base_path": "\\\\172.28.51.53\\Especiales",
+        "cleaning_interval_seconds": 3600,
+        "download_emojis": false
+    }
+}

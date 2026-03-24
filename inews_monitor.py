@@ -489,7 +489,7 @@ def _robust_rmtree(path: str, logger=None) -> bool:
 class ContentManager:
     """Gestiona la descarga y limpieza de contenido multimedia de Twitter."""
     
-    def __init__(self, config: Dict, logger: logging.Logger):
+    def __init__(self, config: Dict, logger: logging.Logger, scripts_twitter_path: str = None):
         self.config = config
         self.logger = logger
         self.download_base = config.get("content", {}).get("download_base_path", "Descargas")
@@ -498,6 +498,9 @@ class ContentManager:
             self.download_emojis = raw_download_emojis.strip().lower() in ("1", "true", "yes", "on")
         else:
             self.download_emojis = bool(raw_download_emojis)
+        # Permitir override del scripts_twitter_path desde config global
+        if scripts_twitter_path:
+            self.config.setdefault("content", {})["scripts_twitter_path"] = scripts_twitter_path
         self.state_file = os.path.join(self.download_base, "content_state.json")
         self.logger.info(f"Descarga de emojis habilitada: {self.download_emojis}")
         
@@ -1022,117 +1025,94 @@ class RundownWatcher:
                 }
                 filtered_results.append(result)
         
-                filtered_results.append(result)
-        
         self.active_urls = current_urls
         self.has_run = True
         return filtered_results
 
 
-class INewsMonitor:
+class ProfileRunner:
     """
-    Servicio de monitoreo de MÚLTIPLES minutados de iNews.
-    Soporta hasta 20 monitores simultáneos con procesamiento en paralelo.
-    Cada watcher tiene su propia conexión FTP independiente.
+    Ejecuta la monitorización de UN perfil (programa de TV).
+    Cada perfil tiene sus propios watchers, ContentManager y tipos de rótulo.
+    Múltiples ProfileRunners pueden ejecutarse en paralelo.
     """
     
-    def __init__(self, config_path: str = "config.json"):
-        self.config_path = config_path
-        self.config = self._load_config()
-        self._setup_logging()
+    def __init__(self, profile_name: str, profile_config: Dict, inews_config: Dict, 
+                 scripts_twitter_path: str, logger: logging.Logger):
+        self.profile_name = profile_name
+        self.display_name = profile_config.get("name", profile_name)
+        self.profile_config = profile_config
+        self.inews_config = inews_config
+        self.logger = logging.getLogger(f"Profile_{profile_name}")
         
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self._configure_story_parser()
-        self.content_manager = ContentManager(self.config, self.logger)
+        # Tipos de rótulo específicos de este perfil
+        self.tipos_validos = profile_config.get("monitor", {}).get(
+            "tipos_rotulo_validos", ["X_Total", "X_Faldon"]
+        )
         
-        # Paralelismo configurable (default 5 hilos, máximo razonable para FTP)
-        self.max_workers = self.config.get("monitor", {}).get("max_workers", 5)
+        # Paralelismo configurable por perfil
+        self.max_workers = profile_config.get("monitor", {}).get("max_workers", 5)
         
+        # ContentManager independiente para este perfil
+        self.content_manager = ContentManager(
+            profile_config, self.logger, 
+            scripts_twitter_path=scripts_twitter_path
+        )
+        
+        # Watchers de este perfil (solo los activos)
         self.watchers: List[RundownWatcher] = []
         self._initialize_watchers()
-
-        # Configuración de limpieza
-        self.cleaning_interval = self.config.get("cleaning_interval_seconds", 3600) # Default 1 hora
-        self.last_clean_time = 0 
         
-        # Lock para proteger la impresión por consola desde múltiples hilos
+        # Limpieza
+        self.cleaning_interval = profile_config.get("content", {}).get(
+            "cleaning_interval_seconds", 3600
+        )
+        self.last_clean_time = 0
+        
+        # Lock para impresión
         self._print_lock = threading.Lock()
-        
-        self.running = False
-
-    def _configure_story_parser(self):
-        """
-        Carga los tipos de rotulo validos desde config y los aplica al parser global.
-        Si la config no trae un valor usable, conserva el valor por defecto del codigo.
-        """
-        monitor_config = self.config.get("monitor", {})
-        configured_types = monitor_config.get("tipos_rotulo_validos")
-
-        if isinstance(configured_types, list):
-            cleaned_types = [str(t).strip() for t in configured_types if str(t).strip()]
-            if cleaned_types:
-                StoryParser.TIPOS_VALIDOS = cleaned_types
-                self.logger.info(f"Tipos de rotulo validos (config): {StoryParser.TIPOS_VALIDOS}")
-                return
-
-        self.logger.info(f"Tipos de rotulo validos (default): {StoryParser.TIPOS_VALIDOS}")
-        
-    def _load_config(self) -> Dict:
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"ERROR cargando config: {e}")
-            sys.exit(1)
-
-    def _setup_logging(self):
-        log_config = self.config.get("logging", {})
-        log_level = getattr(logging, log_config.get("level", "INFO"))
-        log_file = log_config.get("file", "inews_monitor.log")
-        
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setFormatter(formatter)
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        
-        root = logging.getLogger()
-        root.setLevel(log_level)
-        if not root.handlers:
-            root.addHandler(file_handler)
-            root.addHandler(console_handler)
-
+    
     def _initialize_watchers(self):
-        """Inicializa los watchers basados en la configuración.
-        Cada watcher recibe su propia conexión FTP independiente."""
-        inews_config = self.config["inews"]
+        """Inicializa solo los monitores con active=true."""
+        monitors = self.profile_config.get("monitors", [])
+        ap_filter = self.profile_config.get("monitor", {}).get("ap_filter", "")
         
-        # Configuración legacy
-        if "monitor" in self.config and "rundown_path" in self.config["inews"]:
-            legacy_conf = {
-                "rundown_path": self.config["inews"]["rundown_path"],
-                "interval_seconds": self.config["monitor"].get("interval_seconds", 30),
-                "ap_filter": self.config["monitor"].get("ap_filter", "")
-            }
-            self.watchers.append(RundownWatcher("DEFAULT", legacy_conf, inews_config))
-            
-        # Nueva configuración lista de monitores
-        monitors = self.config.get("monitors", [])
+        active_count = 0
+        inactive_count = 0
+        
         for i, m_conf in enumerate(monitors):
+            # Solo crear watchers para monitores activos
+            if not m_conf.get("active", True):
+                inactive_count += 1
+                continue
+            
             name = m_conf.get("name", f"MONITOR_{i+1}")
             merged_conf = m_conf.copy()
             if "ap_filter" not in merged_conf:
-                 merged_conf["ap_filter"] = self.config.get("monitor", {}).get("ap_filter", "")
-                 
-            self.watchers.append(RundownWatcher(name, merged_conf, inews_config))
+                merged_conf["ap_filter"] = ap_filter
             
-        self.logger.info(f"Inicializados {len(self.watchers)} watchers (max_workers={self.max_workers}).")
-
+            # Nombre del watcher incluye el perfil para distinguir en logs
+            watcher_name = f"{self.profile_name}/{name}"
+            self.watchers.append(RundownWatcher(watcher_name, merged_conf, self.inews_config))
+            active_count += 1
+        
+        self.logger.info(
+            f"Perfil {self.display_name}: {active_count} monitores activos, "
+            f"{inactive_count} inactivos (max_workers={self.max_workers})"
+        )
+    
     def _process_watcher(self, watcher: RundownWatcher) -> List[Dict]:
-        """Procesa un watcher individual. Se ejecuta en un hilo del pool.
-        Captura excepciones para aislar fallos entre watchers."""
+        """Procesa un watcher con los tipos de rótulo de este perfil."""
         try:
+            # Aplicar tipos de rótulo específicos de este perfil
+            # (cada perfil puede tener distintos tipos_rotulo_validos)
+            original_tipos = StoryParser.TIPOS_VALIDOS
+            StoryParser.TIPOS_VALIDOS = self.tipos_validos
+            
             results = watcher.process()
+            
+            StoryParser.TIPOS_VALIDOS = original_tipos
+            
             if results:
                 with self._print_lock:
                     self._print_results(results, watcher.name)
@@ -1140,24 +1120,22 @@ class INewsMonitor:
         except Exception as e:
             self.logger.error(f"Error procesando watcher {watcher.name}: {e}", exc_info=True)
             return []
-
+    
     def run_once(self):
-        """Ejecuta una pasada de todos los watchers pendientes EN PARALELO."""
+        """Ejecuta una pasada de todos los watchers pendientes de este perfil."""
         due_watchers = [w for w in self.watchers if w.is_due()]
         
         if not due_watchers:
             return []
-
-        any_processed = False
-        all_new_results = []
         
-        # Ejecutar watchers en paralelo con ThreadPoolExecutor
+        all_new_results = []
+        any_processed = False
+        
         effective_workers = min(self.max_workers, len(due_watchers))
-        self.logger.debug(f"Procesando {len(due_watchers)} watchers con {effective_workers} hilos...")
         
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
             future_to_watcher = {
-                executor.submit(self._process_watcher, w): w 
+                executor.submit(self._process_watcher, w): w
                 for w in due_watchers
             }
             
@@ -1169,10 +1147,10 @@ class INewsMonitor:
                         all_new_results.extend(results)
                     any_processed = True
                 except Exception as e:
-                    self.logger.error(f"Excepción inesperada en watcher {watcher.name}: {e}", exc_info=True)
-
-        if any_processed or all_new_results:
-            # Sincronización (en hilo principal, después de que todos terminen)
+                    self.logger.error(f"Excepción en watcher {watcher.name}: {e}", exc_info=True)
+        
+        if any_processed:
+            # Sincronización de contenido
             total_urls = set()
             all_watchers_ready = True
             
@@ -1181,9 +1159,6 @@ class INewsMonitor:
                 if not w.has_run:
                     all_watchers_ready = False
             
-            # Determinar si debemos limpiar
-            # 1. Todos los watchers deben haber reportado al menos una vez (para no borrar cosas de un rundown que no hemos leído aún)
-            # 2. Debe haber pasado el intervalo de limpieza
             should_clean = False
             current_time = time.time()
             
@@ -1191,20 +1166,26 @@ class INewsMonitor:
                 if current_time - self.last_clean_time >= self.cleaning_interval:
                     should_clean = True
                     self.last_clean_time = current_time
-            else:
-                self.logger.debug("Esperando a que todos los watchers se inicialicen para permitir limpieza...")
-
-            self.content_manager.sync_content(list(total_urls), clean=should_clean)
             
+            self.content_manager.sync_content(list(total_urls), clean=should_clean)
+        
         return all_new_results
-
+    
+    def disconnect_all(self):
+        """Desconecta todas las conexiones FTP."""
+        for w in self.watchers:
+            try:
+                w.disconnect()
+            except Exception:
+                pass
+    
     def _print_results(self, results, source_name):
         for result in results:
             urls = result['info'].get('urls', [])
             rotulos = result['info'].get('rotulos_filtrados', [])
             
             print("\n" + "="*60)
-            print(f"FUENTE: {source_name}")
+            print(f"[{self.display_name}] FUENTE: {source_name}")
             print(f"ENTRADA: {result['entry_name']}")
             print(f"TÍTULO: {result['info']['title']}")
             print("-"*60)
@@ -1218,29 +1199,160 @@ class INewsMonitor:
                 print(f"  → {url}")
             print("="*60 + "\n")
 
-    def _disconnect_all(self):
-        """Desconecta todas las conexiones FTP de todos los watchers."""
-        for w in self.watchers:
-            try:
-                w.disconnect()
-            except Exception:
-                pass
 
+class INewsMonitor:
+    """
+    Servicio de monitoreo de MÚLTIPLES programas de TV.
+    Cada programa (perfil) se ejecuta de forma independiente con sus propios
+    watchers, ContentManager y configuración.
+    Soporta ejecución simultánea de múltiples perfiles.
+    
+    Estructura:
+        config.json → credenciales + active_profiles + logging
+        profiles/*.json → configuración por programa (monitores, rutas, etc.)
+    """
+    
+    def __init__(self, config_path: str = "config.json"):
+        self.config_path = os.path.abspath(config_path)
+        self.config = self._load_config()
+        self._setup_logging()
+        
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Ruta compartida de ScriptsTwitter
+        self.scripts_twitter_path = self.config.get(
+            "scripts_twitter_path", "ScriptsTwitter"
+        )
+        # Hacer absoluta si es relativa
+        if not os.path.isabs(self.scripts_twitter_path):
+            base_dir = os.path.dirname(self.config_path)
+            self.scripts_twitter_path = os.path.join(base_dir, self.scripts_twitter_path)
+        
+        # Cargar perfiles activos
+        self.profile_runners: List[ProfileRunner] = []
+        self._load_profiles()
+        
+        self.running = False
+        
+    def _load_config(self) -> Dict:
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"ERROR cargando config: {e}")
+            sys.exit(1)
+    
+    def _setup_logging(self):
+        log_config = self.config.get("logging", {})
+        log_level = getattr(logging, log_config.get("level", "INFO"))
+        log_file = log_config.get("file", "inews_monitor.log")
+        
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setFormatter(formatter)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        
+        root = logging.getLogger()
+        root.setLevel(log_level)
+        if not root.handlers:
+            root.addHandler(file_handler)
+            root.addHandler(console_handler)
+    
+    def _load_profiles(self):
+        """Carga los perfiles activos desde profiles/*.json."""
+        active_names = self.config.get("active_profiles", [])
+        profiles_dir = self.config.get("profiles_dir", "profiles")
+        
+        # Hacer absoluta si es relativa
+        if not os.path.isabs(profiles_dir):
+            base_dir = os.path.dirname(self.config_path)
+            profiles_dir = os.path.join(base_dir, profiles_dir)
+        
+        if not os.path.isdir(profiles_dir):
+            self.logger.error(f"Directorio de perfiles no encontrado: {profiles_dir}")
+            return
+        
+        inews_config = self.config["inews"]
+        
+        # Compatibilidad: si no hay active_profiles pero hay monitors en config.json (legacy)
+        if not active_names and "monitors" in self.config:
+            self.logger.info("Modo legacy: usando monitors de config.json directamente")
+            runner = ProfileRunner(
+                "LEGACY", self.config, inews_config,
+                self.scripts_twitter_path, self.logger
+            )
+            self.profile_runners.append(runner)
+            return
+        
+        for profile_name in active_names:
+            profile_path = os.path.join(profiles_dir, f"{profile_name}.json")
+            
+            if not os.path.isfile(profile_path):
+                self.logger.error(f"Perfil no encontrado: {profile_path}")
+                continue
+            
+            try:
+                with open(profile_path, 'r', encoding='utf-8') as f:
+                    profile_config = json.load(f)
+                
+                runner = ProfileRunner(
+                    profile_name, profile_config, inews_config,
+                    self.scripts_twitter_path, self.logger
+                )
+                self.profile_runners.append(runner)
+                self.logger.info(f"Perfil cargado: {profile_name} ({runner.display_name})")
+                
+            except Exception as e:
+                self.logger.error(f"Error cargando perfil {profile_name}: {e}")
+        
+        total_watchers = sum(len(r.watchers) for r in self.profile_runners)
+        self.logger.info(
+            f"Cargados {len(self.profile_runners)} perfiles con "
+            f"{total_watchers} watchers activos en total"
+        )
+    
+    def run_once(self):
+        """Ejecuta una pasada de todos los perfiles."""
+        all_results = []
+        for runner in self.profile_runners:
+            try:
+                results = runner.run_once()
+                if results:
+                    all_results.extend(results)
+            except Exception as e:
+                self.logger.error(f"Error en perfil {runner.profile_name}: {e}", exc_info=True)
+        return all_results
+    
+    def _disconnect_all(self):
+        """Desconecta todas las conexiones de todos los perfiles."""
+        for runner in self.profile_runners:
+            runner.disconnect_all()
+    
     def run(self):
         self.running = True
-        self.logger.info(f"Iniciando monitoreo multi-rundown paralelo ({len(self.watchers)} watchers, {self.max_workers} hilos max)...")
+        profile_names = [r.display_name for r in self.profile_runners]
+        total_watchers = sum(len(r.watchers) for r in self.profile_runners)
+        self.logger.info(
+            f"Iniciando monitoreo multi-perfil: {profile_names} "
+            f"({total_watchers} watchers activos)"
+        )
         
         try:
             while self.running:
                 self.run_once()
-                time.sleep(1) 
+                time.sleep(1)
         except KeyboardInterrupt:
             self.logger.info("Deteniendo...")
         finally:
             self._disconnect_all()
 
+
 def main():
-    parser = argparse.ArgumentParser(description='Monitor iNews Multi-Rundown')
+    parser = argparse.ArgumentParser(description='Monitor iNews Multi-Perfil')
     parser.add_argument('--config', '-c', default='config.json', help='Config file')
     parser.add_argument('--once', '-o', action='store_true', help='Ejecutar una vez y salir')
     args = parser.parse_args()
@@ -1254,6 +1366,7 @@ def main():
         monitor.run_once()
     else:
         monitor.run()
+
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,91 @@
+{
+    "inews": {
+        "host": "172.28.158.11",
+        "user": "rcampos",
+        "password": "zazo1234"
+    },
+    "monitors": [
+        {
+            "name": "AVANCES-FS",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/AVANCES-FS",
+            "interval_seconds": 45
+        },
+        {
+            "name": "AVANCES-MANANA",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/AVANCES-MANANA",
+            "interval_seconds": 45
+        },
+        {
+            "name": "AVANCES-TARDE",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/AVANCES-TARDE",
+            "interval_seconds": 45
+        },
+        {
+            "name": "MADRID-1",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.MADRID/.MINUTADO",
+            "interval_seconds": 45
+        },
+        {
+            "name": "MADRID-2",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.MADRID/.MINUTADO2",
+            "interval_seconds": 45
+        },
+        {
+            "name": "MATINAL-A",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.MATINAL/.MINUTADO-A",
+            "interval_seconds": 45
+        },
+        {
+            "name": "MATINAL-B",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.MATINAL/.MINUTADO-B",
+            "interval_seconds": 45
+        },
+        {
+            "name": "TD1",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.TD1/.MINUTADO",
+            "interval_seconds": 45
+        },
+        {
+            "name": "TD2",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.TD2/.MINUTADO",
+            "interval_seconds": 45
+        },
+        {
+            "name": "TFS1",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.TFS1/.MINUTADO",
+            "interval_seconds": 45
+        },
+        {
+            "name": "TFS2",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.TFS2/.MINUTADO",
+            "interval_seconds": 45
+        },
+        {
+            "name": "TFS3",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.TFS3/.MINUTADO",
+            "interval_seconds": 45
+        },
+        {
+            "name": "TFS4",
+            "rundown_path": "INF-DIGITAL/.DIARIOS/.TFS4/.MINUTADO",
+            "interval_seconds": 45
+        }
+    ],
+    "monitor": {
+        "ap_filter": "",
+        "max_workers": 5,
+        "tipos_rotulo_validos": [
+            "X_Total"
+        ]
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "inews_monitor.log"
+    },
+    "content": {
+        "download_base_path": "\\\\172.28.51.53\\td",
+        "cleaning_interval_seconds": 3600,
+        "scripts_twitter_path": "C:\\TrabajosPrime\\AppTuitsPrime\\TD\\ScriptsTwitter",
+        "download_emojis": false
+    }
+}

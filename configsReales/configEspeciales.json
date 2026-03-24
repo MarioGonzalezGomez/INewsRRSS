@@ -1,0 +1,46 @@
+{
+    "inews": {
+        "host": "172.28.158.11",
+        "user": "rcampos",
+        "password": "zazo1234"
+    },
+    "monitors": [
+        {
+            "name": "ELECCIONES-1",
+            "rundown_path": "INF-DIGITAL/.ELECCIONES/.MINUTADO",
+            "interval_seconds": 20
+        },
+        {
+            "name": "ELECCIONES-2",
+            "rundown_path": "INF-DIGITAL/.ELECCIONES/.MINUTADO2",
+            "interval_seconds": 20
+        },
+        {
+            "name": "ESPECIALES-EMERITO",
+            "rundown_path": "INF-DIGITAL/.ESPECIALES/.EMERITO",
+            "interval_seconds": 500
+        },
+        {
+            "name": "ESPECIALES-FFAA",
+            "rundown_path": "INF-DIGITAL/.ESPECIALES/.FFAA",
+            "interval_seconds": 500
+        }
+    ],
+    "monitor": {
+        "ap_filter": "",
+        "max_workers": 2,
+        "tipos_rotulo_validos": [
+            "X_TotalV2"
+        ]
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "inews_monitor.log"
+    },
+    "content": {
+        "download_base_path": "\\\\172.28.51.53\\Especiales",
+        "cleaning_interval_seconds": 3600,
+        "scripts_twitter_path": "C:\\TrabajosPrime\\AppTuitsPrime\\Especiales\\ScriptsTwitter",
+        "download_emojis": false
+    }
+}
