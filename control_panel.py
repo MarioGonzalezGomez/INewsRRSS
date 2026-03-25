@@ -708,6 +708,18 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="container">
         <div class="status-bar" id="statusBar"></div>
         <div class="profile-grid" id="profileGrid"></div>
+
+        <div class="logs-container" style="margin-top: 40px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius);">
+            <div style="padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
+                <h3 style="font-size: 1rem; font-weight: 600; display: flex; align-items: center; gap: 8px;">
+                    ▶ Terminal de Errores y Logs en Vivo
+                </h3>
+                <button class="btn" onclick="fetchLogs()">⟳ Refrescar Logs</button>
+            </div>
+            <div id="logsView" style="padding: 16px; font-family: 'Courier New', monospace; font-size: 0.8rem; height: 300px; overflow-y: auto; background: #0a0a0f; color: #a3b8cc; line-height: 1.4;">
+                Cargando logs...
+            </div>
+        </div>
     </div>
 
     <div class="toast" id="toast"></div>
@@ -961,11 +973,41 @@ HTML_PAGE = """<!DOCTYPE html>
             }
         }
 
+        async function fetchLogs() {
+            try {
+                const data = await api('GET', '/logs');
+                const logsView = document.getElementById('logsView');
+                if (data.logs && logsView) {
+                    logsView.innerHTML = data.logs.map(line => {
+                        let color = '#a3b8cc';
+                        if (line.includes('ERROR') || line.includes('Exception') || line.includes('Traceback')) {
+                            color = '#ef4444'; // Rojo claro
+                        } else if (line.includes('WARNING') || line.includes('WARN')) {
+                            color = '#eab308'; // Amarillo
+                        } else if (line.includes('✅')) {
+                            color = '#22c55e'; // Verde
+                        }
+                        
+                        // Escapar HTML básico
+                        const escapedLine = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                        return `<div style="color: ${color}; white-space: pre-wrap; margin-bottom: 2px;">${escapedLine}</div>`;
+                    }).join('');
+                    
+                    // Auto-scroll al fondo
+                    logsView.scrollTop = logsView.scrollHeight;
+                }
+            } catch (e) {
+                console.error("Error fetching logs:", e);
+            }
+        }
+
         // Cargar al inicio
         loadProfiles();
+        fetchLogs();
 
-        // Auto-refrescar cada 30 segundos
+        // Auto-refrescar
         setInterval(loadProfiles, 30000);
+        setInterval(fetchLogs, 5000);
     </script>
 </body>
 </html>"""
@@ -1014,6 +1056,22 @@ class ControlPanelHandler(BaseHTTPRequestHandler):
             try:
                 profiles = list_all_profiles()
                 self._send_json({"profiles": profiles})
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+                
+        elif path == '/api/logs':
+            try:
+                log_filepath = os.path.join(get_base_dir(), "inews_monitor.log")
+                if not os.path.exists(log_filepath):
+                    self._send_json({"logs": ["Aún no hay archivos de log o inews_monitor.log no encontrado."]})
+                    return 
+                
+                # Leemos las últimas 150 líneas
+                with open(log_filepath, 'r', encoding='utf-8', errors='replace') as f:
+                    lines = f.readlines()
+                    last_lines = [line.strip() for line in lines[-150:]]
+                
+                self._send_json({"logs": last_lines})
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
         
