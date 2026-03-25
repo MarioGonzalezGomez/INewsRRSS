@@ -1,0 +1,14 @@
+{
+    "name": "Deportes",
+    "monitors": [],
+    "monitor": {
+        "ap_filter": "",
+        "max_workers": 2,
+        "tipos_rotulo_validos": ["X_TotalV2"]
+    },
+    "content": {
+        "download_base_path": "\\\\172.28.51.53\\Deportes",
+        "cleaning_interval_seconds": 3600,
+        "download_emojis": false
+    }
+}
