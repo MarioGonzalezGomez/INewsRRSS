@@ -28,6 +28,7 @@ from typing import List, Dict, Optional, Tuple
 from io import StringIO
 import io
 import requests
+from urllib.parse import urlparse
 
 # Force UTF-8 for stdout/stderr to avoid crashes with emojis on Windows
 if sys.stdout.encoding != 'utf-8':
@@ -142,6 +143,55 @@ class INewsConnection:
                 entries.append(entry)
         
         return entries
+
+    def list_story_names(self, path: str = None) -> List[str]:
+        """
+        Lista nombres de stories de forma robusta.
+        Prioriza NLST (nombres puros) y usa LIST parseado como respaldo.
+        """
+        if not self.ensure_connected():
+            return []
+
+        # Intento principal: NLST
+        try:
+            if path:
+                self.navigate_to(path)
+
+            names: List[str] = []
+            self.ftp.retrlines('NLST', names.append)
+
+            cleaned = []
+            for raw_name in names:
+                name = (raw_name or "").strip().rstrip("/")
+                if not name:
+                    continue
+                if "/" in name:
+                    name = name.split("/")[-1]
+                cleaned.append(name)
+
+            # Deduplicar preservando orden
+            deduped = []
+            seen = set()
+            for name in cleaned:
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(name)
+            return deduped
+
+        except ftplib.all_errors as e:
+            self.logger.warning(f"NLST falló, usando LIST parseado como respaldo: {e}")
+
+        # Respaldo: LIST parseado
+        entries = self.list_entries(path)
+        story_names = []
+        for entry in entries:
+            name = entry.get("name", "")
+            if not name or entry.get("is_dir", False):
+                continue
+            story_names.append(name)
+        return story_names
     
     def _parse_list_entry(self, line: str) -> Optional[Dict]:
         """Parsea una línea de la salida LIST."""
@@ -204,6 +254,10 @@ class StoryParser:
     
     # Tipos de rótulo que nos interesan (para filtrado)
     TIPOS_VALIDOS = ["X_Total", "X_Faldon"]
+    SOCIAL_URL_PATTERN = re.compile(
+        r'https?://(?:www\.)?(?:x\.com|twitter\.com|bsky\.app|truthsocial\.com)/[^\s<>\]\|"\')]+',
+        re.IGNORECASE
+    )
     
     @staticmethod
     def extract_ap_tags(content: str) -> List[str]:
@@ -334,6 +388,63 @@ class StoryParser:
         rotulos = StoryParser.extract_rotulos_filtrados(content)
         urls = [r.contenido for r in rotulos if r.contenido]
         return urls
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """Limpia separadores frecuentes al final de una URL extraida del NSML."""
+        clean = (url or "").strip().strip("'\"")
+        # iNews suele concatenar metadatos tras la URL: "(In  Dur", "|", etc.
+        for sep in ("(", "|", "<", ">", "]", ")", " ", "\t", "\r", "\n"):
+            if sep in clean:
+                clean = clean.split(sep, 1)[0]
+        return clean.rstrip(".,;:|)]}>")
+
+    @staticmethod
+    def _extract_social_urls_from_text(text: str) -> List[str]:
+        if not text:
+            return []
+        matches = StoryParser.SOCIAL_URL_PATTERN.findall(text)
+        normalized = []
+        for m in matches:
+            clean = StoryParser._normalize_url(m)
+            if clean:
+                normalized.append(clean)
+        return normalized
+
+    @staticmethod
+    def extract_social_urls(content: str) -> List[str]:
+        """
+        Extrae URLs sociales de forma robusta:
+        1) rotulos filtrados por tipo
+        2) todos los rotulos parseados
+        3) contenido bruto de <ap>
+        4) contenido completo NSML (respaldo)
+        """
+        urls: List[str] = []
+
+        filtered_rotulos = StoryParser.extract_rotulos_filtrados(content)
+        for rotulo in filtered_rotulos:
+            urls.extend(StoryParser._extract_social_urls_from_text(rotulo.contenido))
+
+        all_rotulos = StoryParser.extract_rotulos(content)
+        for rotulo in all_rotulos:
+            urls.extend(StoryParser._extract_social_urls_from_text(rotulo.contenido))
+
+        for ap in StoryParser.extract_ap_tags(content):
+            urls.extend(StoryParser._extract_social_urls_from_text(ap))
+
+        # Buscar también en todo el contenido bruto por si hay formato NSML raro
+        urls.extend(StoryParser._extract_social_urls_from_text(content))
+
+        deduped = []
+        seen = set()
+        for url in urls:
+            key = url.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(url)
+        return deduped
     
     @staticmethod
     def extract_field(content: str, field_id: str) -> Optional[str]:
@@ -350,6 +461,7 @@ class StoryParser:
         """Extrae información relevante de una historia NSML."""
         rotulos = StoryParser.extract_rotulos(content)
         rotulos_filtrados = StoryParser.extract_rotulos_filtrados(content)
+        social_urls = StoryParser.extract_social_urls(content)
         
         info = {
             "title": StoryParser.extract_field(content, "title") or "",
@@ -361,7 +473,7 @@ class StoryParser:
             "has_ap_content": len(StoryParser.extract_ap_tags(content)) > 0,
             "rotulos": [r.to_dict() for r in rotulos],
             "rotulos_filtrados": [r.to_dict() for r in rotulos_filtrados],
-            "urls": [r.contenido for r in rotulos_filtrados if r.contenido]
+            "urls": social_urls
         }
         return info
     
@@ -390,8 +502,11 @@ class StoryParser:
             True si hay coincidencia
         """
         # Modo especial: filtrar solo entradas con rótulos válidos
-        if filter_pattern == "ROTULOS" or filter_pattern == "":
+        if filter_pattern == "ROTULOS":
             return StoryParser.has_valid_rotulos(content)
+
+        if filter_pattern == "":
+            return len(StoryParser.extract_social_urls(content)) > 0
         
         ap_contents = StoryParser.extract_ap_tags(content)
         
@@ -487,7 +602,7 @@ def _robust_rmtree(path: str, logger=None) -> bool:
 
 
 class ContentManager:
-    """Gestiona la descarga y limpieza de contenido multimedia de Twitter."""
+    """Gestiona la descarga y limpieza de contenido multimedia multi-plataforma."""
     
     def __init__(self, config: Dict, logger: logging.Logger, scripts_twitter_path: str = None):
         self.config = config
@@ -505,7 +620,10 @@ class ContentManager:
         self.logger.info(f"Descarga de emojis habilitada: {self.download_emojis}")
         
         # Cargar módulo de Twitter dinámicamente
+        self.scripts_path = self._resolve_scripts_path()
         self.tweet_scraper_class = self._load_twitter_scraper_class()
+        self.bluesky_scraper_class = self._load_scraper_class("bluesky_scraper", "BlueskyScraper")
+        self.truth_scraper_class = self._load_scraper_class("truth_scraper", "TruthSocialScraper")
         
         # Asegurar directorio base
         os.makedirs(self.download_base, exist_ok=True)
@@ -513,9 +631,35 @@ class ContentManager:
         # Estado actual {url: tweet_id}
         self.state = self._load_state()
 
+    def _resolve_scripts_path(self) -> Optional[str]:
+        scripts_path = self.config.get("content", {}).get("scripts_twitter_path")
+
+        if not scripts_path or not os.path.exists(scripts_path):
+            local_scripts = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ScriptsTwitter")
+            if os.path.exists(local_scripts):
+                self.logger.warning(f"Ruta config no valida ({scripts_path}), usando local: {local_scripts}")
+                scripts_path = local_scripts
+            else:
+                self.logger.error(f"Ruta de scripts Twitter no valida y no hallada localmente: {scripts_path}")
+                return None
+
+        if scripts_path not in sys.path:
+            sys.path.append(scripts_path)
+        return scripts_path
+
+    def _load_scraper_class(self, module_name: str, class_name: str):
+        if not self.scripts_path:
+            return None
+        try:
+            module = __import__(module_name, fromlist=[class_name])
+            return getattr(module, class_name)
+        except Exception as e:
+            self.logger.error(f"Error importando {class_name} desde {module_name}: {e}")
+            return None
+
     def _load_twitter_scraper_class(self):
         """Carga la clase TweetScraper desde la ruta configurada."""
-        scripts_path = self.config.get("content", {}).get("scripts_twitter_path")
+        scripts_path = self.scripts_path
         
         # Fallback: intentar buscar ScriptsTwitter en el directorio actual si la config falla
         if not scripts_path or not os.path.exists(scripts_path):
@@ -805,12 +949,44 @@ class ContentManager:
         except Exception as e:
             self.logger.error(f"Error guardando estado: {e}")
 
+    def _detect_platform(self, url: str) -> Optional[str]:
+        domain = urlparse(url).netloc.lower()
+        if "x.com" in domain or "twitter.com" in domain:
+            return "twitter"
+        if "bsky.app" in domain:
+            return "bluesky"
+        if "truthsocial.com" in domain:
+            return "truth"
+        return None
+
+    @staticmethod
+    def _safe_id(value: str) -> str:
+        return re.sub(r'[^A-Za-z0-9_.-]+', '_', value or "")
+
+    def _extract_content_id(self, url: str, platform: str) -> Optional[str]:
+        if platform == "twitter":
+            match = re.search(r'/status/(\d+)', url)
+            return match.group(1) if match else None
+
+        if platform == "bluesky":
+            match = re.search(r'bsky\.app/profile/([^/]+)/post/([^/?#]+)', url, re.IGNORECASE)
+            if not match:
+                return None
+            handle = self._safe_id(match.group(1))
+            post_id = self._safe_id(match.group(2))
+            return f"bsky_{handle}_{post_id}"
+
+        if platform == "truth":
+            match = re.search(r'truthsocial\.com/@[^/]+/posts/(\d+)', url, re.IGNORECASE)
+            return f"truth_{match.group(1)}" if match else None
+
+        return None
+
+    def _get_json_path_for_id(self, content_id: str) -> str:
+        return os.path.join(self.download_base, content_id, "tweet_api.json")
+
     def sync_content(self, current_urls: List[str], clean: bool = True):
         """Sincroniza el contenido: descarga nuevos, borra obsoletos si clean=True."""
-        if not self.tweet_scraper_class:
-            self.logger.error("No se puede sincronizar: Scraper no cargado.")
-            return
-
         current_set = set(current_urls)
         known_set = set(self.state.keys())
 
@@ -824,20 +1000,45 @@ class ContentManager:
             
             for url in new_urls:
                 try:
-                    # Crear nueva instancia para cada URL para evitar anidamiento
-                    scraper = self.tweet_scraper_class(
-                        output_dir=self.download_base,
-                        download_emojis=self.download_emojis
-                    )
+                    platform = self._detect_platform(url)
+                    if not platform:
+                        self.logger.warning(f"URL con dominio no soportado: {url}")
+                        continue
+
+                    content_id = self._extract_content_id(url, platform)
+                    if not content_id:
+                        self.logger.warning(f"URL inválida (no se pudo extraer ID): {url}")
+                        continue
                     self.logger.info(f"Descargando contenido para: {url}")
-                    # Extraer ID para guardar en estado
-                    tweet_id = scraper.extract_tweet_id(url)
-                    if tweet_id:
+                    if platform == "twitter":
+                        if not self.tweet_scraper_class:
+                            self.logger.error("Scraper de Twitter no cargado.")
+                            continue
+                        scraper = self.tweet_scraper_class(
+                            output_dir=self.download_base,
+                            download_emojis=self.download_emojis
+                        )
                         scraper.run(url)
-                        self.state[url] = tweet_id
+                    elif platform == "bluesky":
+                        if not self.bluesky_scraper_class:
+                            self.logger.error("Scraper de Bluesky no cargado.")
+                            continue
+                        target_dir = os.path.join(self.download_base, content_id)
+                        scraper = self.bluesky_scraper_class(output_dir=target_dir)
+                        scraper.run(url)
+                    else:
+                        if not self.truth_scraper_class:
+                            self.logger.error("Scraper de Truth Social no cargado.")
+                            continue
+                        target_dir = os.path.join(self.download_base, content_id)
+                        scraper = self.truth_scraper_class(output_dir=target_dir)
+                        scraper.run(url)
+
+                    if os.path.exists(self._get_json_path_for_id(content_id)):
+                        self.state[url] = content_id
                         self._save_state()
                     else:
-                        self.logger.warning(f"URL inválida (no se pudo extraer ID): {url}")
+                        self.logger.warning(f"No se generó tweet_api.json para {url} (id={content_id})")
                 except Exception as e:
                     self.logger.error(f"Error descargando {url}: {e}")
 
@@ -901,6 +1102,13 @@ class RundownWatcher:
         self.path = config.get("rundown_path")
         self.interval = config.get("interval_seconds", 30)
         self.ap_filter = config.get("ap_filter", "")
+        raw_debug = config.get("debug_parser")
+        if raw_debug is None:
+            raw_debug = os.getenv("INEWS_DEBUG_PARSER", "0")
+        if isinstance(raw_debug, str):
+            self.debug_parser = raw_debug.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            self.debug_parser = bool(raw_debug)
         
         # Cada watcher tiene su propia conexión FTP independiente
         self.connection = INewsConnection(
@@ -944,14 +1152,23 @@ class RundownWatcher:
             self.logger.error(f"Fallo navegando a {self.path}")
             return []
         
-        entries = self.connection.list_entries(self.path)
-        if not entries:
-            self.logger.warning(f"No se encontraron entradas o error al listar {self.path}")
+        story_names = self.connection.list_story_names(self.path)
+        if not story_names:
+            self.logger.warning(f"No se encontraron stories o error al listar {self.path}")
             # Si falla, no limpiamos active_urls para evitar borrar contenido por error de red
             return []
         
+        if self.debug_parser:
+            preview = ", ".join(story_names[:15])
+            self.logger.info(
+                f"[DEBUG_PARSER] stories_listadas={len(story_names)} "
+                f"primeras={preview if preview else '-'}"
+            )
+        
         filtered_results = []
         current_urls = []
+        scanned_count = 0
+        matched_count = 0
         
         # Nombres especiales de iNews que no son stories válidas
         INVALID_STORY_NAMES = {'ibc', 'data', 'metadata', 'locator', 'info'}
@@ -959,7 +1176,7 @@ class RundownWatcher:
         def is_valid_story_name(name: str) -> bool:
             """Verifica si un nombre parece ser una story válida de iNews."""
             # Nombres vacíos o muy cortos (1-2 caracteres como 't', 'f', 'a')
-            if not name or len(name) <= 2:
+            if not name:
                 return False
             
             # Nombres que empiezan por '.'
@@ -980,17 +1197,17 @@ class RundownWatcher:
             
             # Nombres con caracteres no alfanuméricos (como '???')
             # Las stories válidas suelen ser alfanuméricas con guiones/underscores/dos puntos
-            if not re.match(r'^[\w\-\s:]+$', name):
+            if not re.search(r'[A-Za-z0-9]', name):
                 return False
             
             
             
             return True
         
-        for entry in entries:
-            entry_name = entry.get("name", "")
-            if not entry_name or entry.get("is_dir", False):
+        for entry_name in story_names:
+            if not entry_name:
                 continue
+            scanned_count += 1
             
             # Filtrar entradas que no son stories válidas
             if not is_valid_story_name(entry_name):
@@ -1003,8 +1220,18 @@ class RundownWatcher:
             # Filtros
             if not StoryParser.matches_ap_filter(content, self.ap_filter):
                 continue
+            matched_count += 1
                 
             story_info = StoryParser.extract_story_info(content)
+            if self.debug_parser:
+                urls = story_info.get("urls", [])
+                preview = ", ".join(urls[:6]) if urls else "-"
+                self.logger.info(
+                    f"[DEBUG_PARSER] {entry_name} ap_tags={len(story_info.get('ap_tags', []))} "
+                    f"rotulos={len(story_info.get('rotulos', []))} "
+                    f"rotulos_filtrados={len(story_info.get('rotulos_filtrados', []))} "
+                    f"urls={len(urls)} -> {preview}"
+                )
             
             # Recolectar URLs (de todas las historias válidas)
             current_urls.extend(story_info.get('urls', []))
@@ -1024,6 +1251,12 @@ class RundownWatcher:
                     "watcher_name": self.name
                 }
                 filtered_results.append(result)
+
+        if self.debug_parser:
+            self.logger.info(
+                f"[DEBUG_PARSER] resumen stories_escaneadas={scanned_count} "
+                f"stories_con_match={matched_count} urls_totales={len(current_urls)}"
+            )
         
         self.active_urls = current_urls
         self.has_run = True
@@ -1090,6 +1323,8 @@ class ProfileRunner:
             merged_conf = m_conf.copy()
             if "ap_filter" not in merged_conf:
                 merged_conf["ap_filter"] = ap_filter
+            if "debug_parser" not in merged_conf:
+                merged_conf["debug_parser"] = self.profile_config.get("monitor", {}).get("debug_parser", False)
             
             # Nombre del watcher incluye el perfil para distinguir en logs
             watcher_name = f"{self.profile_name}/{name}"
@@ -1212,35 +1447,64 @@ class INewsMonitor:
         profiles/*.json → configuración por programa (monitores, rutas, etc.)
     """
     
-    def __init__(self, config_path: str = "config.json"):
+    def __init__(self, config_path: str = "config.json", reload_check_interval_seconds: int = 2):
         self.config_path = os.path.abspath(config_path)
-        self.config = self._load_config()
-        self._setup_logging()
-        
-        self.logger = logging.getLogger(self.__class__.__name__)
-        
-        # Ruta compartida de ScriptsTwitter
-        self.scripts_twitter_path = self.config.get(
-            "scripts_twitter_path", "ScriptsTwitter"
-        )
-        # Hacer absoluta si es relativa
-        if not os.path.isabs(self.scripts_twitter_path):
-            base_dir = os.path.dirname(self.config_path)
-            self.scripts_twitter_path = os.path.join(base_dir, self.scripts_twitter_path)
-        
-        # Cargar perfiles activos
-        self.profile_runners: List[ProfileRunner] = []
-        self._load_profiles()
-        
+        self.reload_check_interval = max(1, int(reload_check_interval_seconds))
         self.running = False
-        
-    def _load_config(self) -> Dict:
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"ERROR cargando config: {e}")
+
+        self._config_mtime: Optional[float] = None
+        self._profile_mtimes: Dict[str, Optional[float]] = {}
+        self._last_reload_check = 0.0
+
+        self.config = self._load_config(fail_fast=True) or {}
+        self._setup_logging()
+
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+        self.scripts_twitter_path = self._resolve_scripts_twitter_path(self.config)
+        self.profile_runners: List[ProfileRunner] = self._build_profile_runners(
+            self.config, self.scripts_twitter_path
+        )
+        self._capture_runtime_fingerprints()
+
+    def _load_config(self, fail_fast: bool = True) -> Optional[Dict]:
+        last_error = None
+        for _ in range(3):
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                last_error = e
+                time.sleep(0.1)
+
+        if fail_fast:
+            print(f"ERROR cargando config: {last_error}")
             sys.exit(1)
+
+        logger = logging.getLogger(self.__class__.__name__)
+        logger.warning(f"No se pudo recargar config (se mantiene la actual): {last_error}")
+        return None
+
+    def _resolve_scripts_twitter_path(self, config: Dict) -> str:
+        scripts_twitter_path = config.get("scripts_twitter_path", "ScriptsTwitter")
+        if not os.path.isabs(scripts_twitter_path):
+            base_dir = os.path.dirname(self.config_path)
+            scripts_twitter_path = os.path.join(base_dir, scripts_twitter_path)
+        return scripts_twitter_path
+
+    def _resolve_profiles_dir(self, config: Dict) -> str:
+        profiles_dir = config.get("profiles_dir", "profiles")
+        if not os.path.isabs(profiles_dir):
+            base_dir = os.path.dirname(self.config_path)
+            profiles_dir = os.path.join(base_dir, profiles_dir)
+        return profiles_dir
+
+    @staticmethod
+    def _get_mtime(path: str) -> Optional[float]:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return None
     
     def _setup_logging(self):
         log_config = self.config.get("logging", {})
@@ -1262,61 +1526,127 @@ class INewsMonitor:
             root.addHandler(file_handler)
             root.addHandler(console_handler)
     
-    def _load_profiles(self):
-        """Carga los perfiles activos desde profiles/*.json."""
-        active_names = self.config.get("active_profiles", [])
-        profiles_dir = self.config.get("profiles_dir", "profiles")
-        
-        # Hacer absoluta si es relativa
-        if not os.path.isabs(profiles_dir):
-            base_dir = os.path.dirname(self.config_path)
-            profiles_dir = os.path.join(base_dir, profiles_dir)
-        
+    def _build_profile_runners(self, config: Dict, scripts_twitter_path: str) -> List[ProfileRunner]:
+        """Construye los runners a partir de la configuración actual en disco."""
+        active_names = config.get("active_profiles", [])
+        profiles_dir = self._resolve_profiles_dir(config)
+        runners: List[ProfileRunner] = []
+
         if not os.path.isdir(profiles_dir):
             self.logger.error(f"Directorio de perfiles no encontrado: {profiles_dir}")
-            return
-        
-        inews_config = self.config["inews"]
-        
+            return runners
+
+        inews_config = config.get("inews")
+        if not isinstance(inews_config, dict):
+            self.logger.error("Config inválida: falta sección 'inews'")
+            return runners
+
         # Compatibilidad: si no hay active_profiles pero hay monitors en config.json (legacy)
-        if not active_names and "monitors" in self.config:
+        if not active_names and "monitors" in config:
             self.logger.info("Modo legacy: usando monitors de config.json directamente")
             runner = ProfileRunner(
-                "LEGACY", self.config, inews_config,
-                self.scripts_twitter_path, self.logger
+                "LEGACY", config, inews_config,
+                scripts_twitter_path, self.logger
             )
-            self.profile_runners.append(runner)
-            return
-        
+            runners.append(runner)
+            return runners
+
         for profile_name in active_names:
             profile_path = os.path.join(profiles_dir, f"{profile_name}.json")
-            
+
             if not os.path.isfile(profile_path):
                 self.logger.error(f"Perfil no encontrado: {profile_path}")
                 continue
-            
+
             try:
                 with open(profile_path, 'r', encoding='utf-8') as f:
                     profile_config = json.load(f)
-                
+
                 runner = ProfileRunner(
                     profile_name, profile_config, inews_config,
-                    self.scripts_twitter_path, self.logger
+                    scripts_twitter_path, self.logger
                 )
-                self.profile_runners.append(runner)
+                runners.append(runner)
                 self.logger.info(f"Perfil cargado: {profile_name} ({runner.display_name})")
-                
+
             except Exception as e:
                 self.logger.error(f"Error cargando perfil {profile_name}: {e}")
-        
-        total_watchers = sum(len(r.watchers) for r in self.profile_runners)
+
+        total_watchers = sum(len(r.watchers) for r in runners)
         self.logger.info(
-            f"Cargados {len(self.profile_runners)} perfiles con "
+            f"Cargados {len(runners)} perfiles con "
             f"{total_watchers} watchers activos en total"
         )
-    
+        return runners
+
+    def _capture_runtime_fingerprints(self):
+        """Guarda huellas de archivos para detectar cambios en caliente."""
+        self._config_mtime = self._get_mtime(self.config_path)
+        profiles_dir = self._resolve_profiles_dir(self.config)
+        active_names = self.config.get("active_profiles", [])
+
+        profile_mtimes: Dict[str, Optional[float]] = {}
+        for profile_name in active_names:
+            profile_path = os.path.join(profiles_dir, f"{profile_name}.json")
+            profile_mtimes[profile_name] = self._get_mtime(profile_path)
+
+        self._profile_mtimes = profile_mtimes
+        self._last_reload_check = time.time()
+
+    def _detect_runtime_changes(self) -> Optional[str]:
+        now = time.time()
+        if now - self._last_reload_check < self.reload_check_interval:
+            return None
+        self._last_reload_check = now
+
+        current_config_mtime = self._get_mtime(self.config_path)
+        if current_config_mtime != self._config_mtime:
+            return "config.json actualizado"
+
+        profiles_dir = self._resolve_profiles_dir(self.config)
+        active_names = self.config.get("active_profiles", [])
+        for profile_name in active_names:
+            profile_path = os.path.join(profiles_dir, f"{profile_name}.json")
+            current_profile_mtime = self._get_mtime(profile_path)
+            if self._profile_mtimes.get(profile_name) != current_profile_mtime:
+                return f"perfil {profile_name}.json actualizado"
+
+        return None
+
+    def _reload_runtime_if_needed(self):
+        reason = self._detect_runtime_changes()
+        if not reason:
+            return
+
+        new_config = self._load_config(fail_fast=False)
+        if not new_config:
+            return
+
+        new_scripts_path = self._resolve_scripts_twitter_path(new_config)
+        new_runners = self._build_profile_runners(new_config, new_scripts_path)
+        old_runners = self.profile_runners
+
+        self.config = new_config
+        self.scripts_twitter_path = new_scripts_path
+        self.profile_runners = new_runners
+        self._capture_runtime_fingerprints()
+
+        for runner in old_runners:
+            try:
+                runner.disconnect_all()
+            except Exception:
+                pass
+
+        profile_names = [r.display_name for r in self.profile_runners]
+        self.logger.info(
+            f"Recarga en caliente aplicada ({reason}). "
+            f"Perfiles activos: {profile_names}"
+        )
+
     def run_once(self):
         """Ejecuta una pasada de todos los perfiles."""
+        self._reload_runtime_if_needed()
+
         all_results = []
         for runner in self.profile_runners:
             try:
@@ -1331,6 +1661,10 @@ class INewsMonitor:
         """Desconecta todas las conexiones de todos los perfiles."""
         for runner in self.profile_runners:
             runner.disconnect_all()
+
+    def stop(self):
+        """Solicita parada limpia del monitor."""
+        self.running = False
     
     def run(self):
         self.running = True

@@ -16,6 +16,7 @@ import os
 import sys
 import glob
 import argparse
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -27,20 +28,64 @@ from urllib.parse import urlparse, parse_qs
 def get_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
+def get_config_path():
+    return os.path.join(get_base_dir(), "config.json")
+
+def get_legacy_panel_state_path():
+    return os.path.join(get_base_dir(), "panel_state.json")
+
+def _normalize_config(config):
+    """Garantiza claves mínimas sin romper otras opciones existentes."""
+    if not isinstance(config, dict):
+        config = {}
+
+    normalized = dict(config)
+    normalized.setdefault("profiles_dir", "profiles")
+
+    active_profiles = normalized.get("active_profiles", [])
+    if not isinstance(active_profiles, list):
+        active_profiles = []
+    normalized["active_profiles"] = active_profiles
+
+    return normalized
+
 def load_config():
-    config_path = os.path.join(get_base_dir(), "panel_state.json")
-    if not os.path.exists(config_path):
-        return {"profiles_dir": "profiles", "active_profiles": []}
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
-        return {"profiles_dir": "profiles", "active_profiles": []}
+    config_path = get_config_path()
+    legacy_path = get_legacy_panel_state_path()
+
+    # Prioridad: config.json (la que usa inews_monitor.py).
+    paths_to_try = [config_path]
+    if not os.path.exists(config_path) and os.path.exists(legacy_path):
+        paths_to_try.append(legacy_path)
+
+    for path in paths_to_try:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return _normalize_config(json.load(f))
+        except Exception:
+            continue
+
+    return _normalize_config({})
 
 def save_config(config):
-    config_path = os.path.join(get_base_dir(), "panel_state.json")
+    config_path = get_config_path()
+
+    # Conserva claves de config.json (credenciales/logging/etc.) al guardar.
+    current = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                current = json.load(f)
+        except Exception:
+            current = {}
+
+    if isinstance(config, dict):
+        current.update(config)
+
     with open(config_path, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
+        json.dump(_normalize_config(current), f, indent=4, ensure_ascii=False)
 
 def get_profiles_dir():
     config = load_config()
@@ -1210,22 +1255,45 @@ class ControlPanelHandler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description='iNews Monitor - Panel de Control')
     parser.add_argument('--port', '-p', type=int, default=8080, help='Puerto (default: 8080)')
+    parser.add_argument('--with-monitor', action='store_true',
+                        help='Inicia también inews_monitor en segundo plano')
+    parser.add_argument('--monitor-config', default='config.json',
+                        help='Archivo de config para inews_monitor (default: config.json)')
     args = parser.parse_args()
     
     # Cambiar al directorio del script
     os.chdir(get_base_dir())
+
+    monitor = None
+    monitor_thread = None
+    if args.with_monitor:
+        from inews_monitor import INewsMonitor
+        monitor = INewsMonitor(config_path=args.monitor_config)
+        monitor_thread = threading.Thread(
+            target=monitor.run,
+            name="INewsMonitorThread",
+            daemon=True
+        )
+        monitor_thread.start()
     
     server = HTTPServer(('0.0.0.0', args.port), ControlPanelHandler)
     print(f"\n{'='*50}")
     print(f"  iNews Monitor - Panel de Control")
     print(f"  http://localhost:{args.port}")
+    if args.with_monitor:
+        print(f"  Monitor de descarga: ACTIVO (config: {args.monitor_config})")
     print(f"{'='*50}\n")
     
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nPanel de control detenido.")
+    finally:
         server.server_close()
+        if monitor:
+            monitor.stop()
+        if monitor_thread:
+            monitor_thread.join(timeout=10)
 
 
 if __name__ == "__main__":

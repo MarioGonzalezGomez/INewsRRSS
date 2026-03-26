@@ -1,15 +1,23 @@
 {
     "name": "TEST",
-    "monitors": [],
+    "monitors": [
+        {
+            "name": "TRD",
+            "rundown_path": "INF-DIGITAL/.TR_DIG/.MINUTADO",
+            "interval_seconds": 20,
+            "active": true
+        }
+    ],
     "monitor": {
         "ap_filter": "",
         "max_workers": 2,
         "tipos_rotulo_validos": [
             "X_TotalV2"
-        ]
+        ],
+        "debug_parser": true
     },
     "content": {
-        "download_base_path": "\\\\172.28.51.53\\Test",
+        "download_base_path": "C:\\TrabajosPRIME\\Tuit",
         "cleaning_interval_seconds": 3600,
         "download_emojis": false
     }
