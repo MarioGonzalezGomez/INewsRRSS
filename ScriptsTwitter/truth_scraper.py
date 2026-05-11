@@ -6,6 +6,7 @@ import time
 from typing import Dict, Any, Optional, Tuple, List
 
 import requests
+import emoji
 
 try:
     import cloudscraper  # type: ignore
@@ -16,12 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 class TruthSocialScraper:
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, download_emojis: bool = True):
         self.output_dir = output_dir
         self.temp_folder_video = os.path.join(self.output_dir, "TempVideo")
         self.output_folder_images = self.output_dir
         self.output_folder_media = self.output_dir
         self.emojis_dir = os.path.join(self.output_dir, "Emojis")
+        self.download_emojis = bool(download_emojis)
 
         self.username = os.getenv("TRUTH_SOCIAL_USER", "automatizacion.ep")
         self.password = os.getenv("TRUTH_SOCIAL_PASS", "Auto1041")
@@ -43,7 +45,8 @@ class TruthSocialScraper:
     def _setup_directories(self):
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.temp_folder_video, exist_ok=True)
-        os.makedirs(self.emojis_dir, exist_ok=True)
+        if self.download_emojis:
+            os.makedirs(self.emojis_dir, exist_ok=True)
 
     def _build_requests_session(self) -> requests.Session:
         session = requests.Session()
@@ -113,6 +116,43 @@ class TruthSocialScraper:
         cleanr = re.compile('<.*?>')
         cleantext = re.sub(cleanr, '', raw_html or "")
         return cleantext
+
+    @staticmethod
+    def extract_emojis(text: str) -> List[str]:
+        """Extrae emojis (sin duplicados y preservando orden)."""
+        found = [entry["emoji"] for entry in emoji.emoji_list(text or "")]
+        deduped = []
+        seen = set()
+        for item in found:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped
+
+    @staticmethod
+    def replace_emojis_with_oemj(text: str, emoji_map: Dict[str, str]) -> str:
+        for emoji_char, replacement in emoji_map.items():
+            text = (text or "").replace(emoji_char, replacement)
+        return text
+
+    @staticmethod
+    def remove_emojis_and_compact_spaces(text: str) -> str:
+        """Elimina emojis y evita huecos dobles por su eliminación."""
+        no_emojis = emoji.replace_emoji(text or "", replace="")
+        return re.sub(r"\s+", " ", no_emojis).strip()
+
+    def download_emoji(self, emoji_char: str, save_path: str):
+        try:
+            codepoints = "-".join(f"{ord(c):x}" for c in emoji_char)
+            emoji_url = f"https://raw.githubusercontent.com/twitter/twemoji/master/assets/72x72/{codepoints}.png"
+            response = self.session.get(emoji_url, timeout=self.timeout)
+            response.raise_for_status()
+            with open(save_path, 'wb') as f:
+                f.write(response.content)
+            logger.info(f"Emoji descargado: {emoji_char} -> {save_path}")
+        except Exception as e:
+            logger.error(f"Error al descargar emoji {emoji_char}: {e}")
 
     def _fetch_status_json(self, post_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
         last_error = ""
@@ -216,10 +256,43 @@ class TruthSocialScraper:
             "username": username
         }
 
+        # Rutas absolutas en formato coherente con index.csv + nombre de archivo.
+        abs_profile = os.path.abspath(os.path.join(self.output_folder_images, "FotoPerfil.jpg")).replace("\\", "/")
+        abs_post_img = os.path.abspath(os.path.join(self.output_folder_images, "FotoPost.jpg")).replace("\\", "/")
+
         if profile_image:
             self.download_image(profile_image, os.path.join(self.output_folder_images, "FotoPerfil.jpg"))
+            data["profile_image"] = abs_profile
+        else:
+            data["profile_image"] = ""
         if tweet_image:
             self.download_image(tweet_image, os.path.join(self.output_folder_images, "FotoPost.jpg"))
+            data["tweet_image"] = abs_post_img
+        else:
+            data["tweet_image"] = ""
+
+        # Mantener semántica consistente con X para consumidores del JSON.
+        data["tweet_video"] = ""
+
+        text_fields = ["text", "name", "text_traducido"]
+        if self.download_emojis:
+            text_emojis = self.extract_emojis(data.get("text", ""))
+            name_emojis = self.extract_emojis(data.get("name", ""))
+            emojis = list(dict.fromkeys(text_emojis + name_emojis))
+            emoji_map = {emoji_char: f"\\oemj {i + 1};" for i, emoji_char in enumerate(emojis)}
+
+            for idx, emoji_char in enumerate(emojis, start=1):
+                filename = f"emoji{idx}.png"
+                filepath = os.path.join(self.emojis_dir, filename)
+                self.download_emoji(emoji_char, filepath)
+
+            for field in text_fields:
+                if field in data:
+                    data[field] = self.replace_emojis_with_oemj(data.get(field, ""), emoji_map)
+        else:
+            for field in text_fields:
+                if field in data:
+                    data[field] = self.remove_emojis_and_compact_spaces(data.get(field, ""))
 
         json_path = os.path.join(self.output_dir, "tweet_api.json")
         with open(json_path, "w", encoding="utf-8") as f:

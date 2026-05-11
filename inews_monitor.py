@@ -1024,14 +1024,28 @@ class ContentManager:
                             self.logger.error("Scraper de Bluesky no cargado.")
                             continue
                         target_dir = os.path.join(self.download_base, content_id)
-                        scraper = self.bluesky_scraper_class(output_dir=target_dir)
+                        try:
+                            scraper = self.bluesky_scraper_class(
+                                output_dir=target_dir,
+                                download_emojis=self.download_emojis
+                            )
+                        except TypeError:
+                            # Compatibilidad con versiones antiguas del scraper.
+                            scraper = self.bluesky_scraper_class(output_dir=target_dir)
                         scraper.run(url)
                     else:
                         if not self.truth_scraper_class:
                             self.logger.error("Scraper de Truth Social no cargado.")
                             continue
                         target_dir = os.path.join(self.download_base, content_id)
-                        scraper = self.truth_scraper_class(output_dir=target_dir)
+                        try:
+                            scraper = self.truth_scraper_class(
+                                output_dir=target_dir,
+                                download_emojis=self.download_emojis
+                            )
+                        except TypeError:
+                            # Compatibilidad con versiones antiguas del scraper.
+                            scraper = self.truth_scraper_class(output_dir=target_dir)
                         scraper.run(url)
 
                     if os.path.exists(self._get_json_path_for_id(content_id)):
