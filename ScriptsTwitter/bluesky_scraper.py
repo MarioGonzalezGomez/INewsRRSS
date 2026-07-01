@@ -140,6 +140,9 @@ class BlueskyScraper:
             "username": username
         }
 
+        abs_profile = os.path.abspath(os.path.join(self.output_folder_images, "FotoPerfil.jpg")).replace("\\", "/")
+        abs_post_img = os.path.abspath(os.path.join(self.output_folder_images, "FotoPost.jpg")).replace("\\", "/")
+        
         if self.download_emojis:
             text_emojis = self.extract_emojis(data.get("text", ""))
             name_emojis = self.extract_emojis(data.get("name", ""))
@@ -161,8 +164,14 @@ class BlueskyScraper:
         
         if profile_image:
             self.download_image(profile_image, os.path.join(self.output_folder_images, "FotoPerfil.jpg"))
+            data["profile_image"] = abs_profile
+        else:
+            data["profile_image"] = ""
         if tweet_image:
             self.download_image(tweet_image, os.path.join(self.output_folder_images, "FotoPost.jpg"))
+            data["tweet_image"] = abs_post_img
+        else:
+            data["tweet_image"] = ""
             
         json_path = os.path.join(self.output_dir, "tweet_api.json")
         with open(json_path, "w", encoding="utf-8") as f:

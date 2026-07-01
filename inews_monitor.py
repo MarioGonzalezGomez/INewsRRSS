@@ -22,9 +22,10 @@ import os
 import sys
 import csv
 import threading
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple
 from io import StringIO
 import io
 import requests
@@ -45,7 +46,11 @@ class INewsConnection:
         self.user = user
         self.password = password
         self.ftp: Optional[ftplib.FTP] = None
+        self.last_used = time.time()
         self.logger = logging.getLogger(self.__class__.__name__)
+
+    def mark_used(self):
+        self.last_used = time.time()
     
     def connect(self) -> bool:
         """Establece conexión con el servidor iNews."""
@@ -82,6 +87,7 @@ class INewsConnection:
             return False
         try:
             self.ftp.voidcmd("NOOP")
+            self.mark_used()
             return True
         except:
             return False
@@ -143,6 +149,38 @@ class INewsConnection:
                 entries.append(entry)
         
         return entries
+
+    def list_story_metadata(self, path: str = None) -> Dict[str, Dict[str, str]]:
+        """
+        Obtiene metadata desde LIST para servidores que no soportan MDTM/SIZE.
+        Devuelve un mapa nombre_story -> firma estable de la linea LIST.
+        """
+        metadata: Dict[str, Dict[str, str]] = {}
+        raw_list = self.list_directory(path)
+        for line in raw_list:
+            parsed = self._parse_list_metadata_line(line)
+            if parsed:
+                metadata[parsed["name"]] = {
+                    "source": "LIST",
+                    "signature": parsed["signature"]
+                }
+        return metadata
+
+    def _parse_list_metadata_line(self, line: str) -> Optional[Dict[str, str]]:
+        parts = (line or "").split()
+        if len(parts) < 8:
+            return None
+
+        raw_name = " ".join(parts[7:]).strip()
+        if raw_name.endswith(" ."):
+            raw_name = raw_name[:-2].strip()
+        if not raw_name or raw_name in (".", ".."):
+            return None
+
+        return {
+            "name": raw_name,
+            "signature": line.strip()
+        }
 
     def list_story_names(self, path: str = None) -> List[str]:
         """
@@ -224,10 +262,150 @@ class INewsConnection:
                 content_lines.append(line)
             
             self.ftp.retrlines(f'RETR {filename}', collect_line)
+            self.mark_used()
             return '\n'.join(content_lines)
         except ftplib.error_perm as e:
             self.logger.error(f"Error leyendo {filename}: {e}")
             return None
+
+    def get_story_metadata(self, filename: str) -> Optional[Dict[str, str]]:
+        """
+        Obtiene metadata ligera para evitar RETR cuando la story no ha cambiado.
+        Si el servidor no soporta MDTM/SIZE, devuelve None y se usa lectura completa.
+        """
+        if not self.ensure_connected():
+            return None
+
+        metadata: Dict[str, str] = {}
+        try:
+            mdtm_response = self.ftp.sendcmd(f"MDTM {filename}")
+            metadata["mtime"] = mdtm_response.strip()
+        except ftplib.all_errors:
+            return None
+
+        try:
+            size_response = self.ftp.sendcmd(f"SIZE {filename}")
+            metadata["size"] = size_response.strip()
+        except ftplib.all_errors:
+            metadata["size"] = ""
+
+        self.mark_used()
+        return metadata
+
+
+class INewsConnectionLease:
+    def __init__(self, pool: "INewsConnectionPool", connection: INewsConnection):
+        self.pool = pool
+        self.connection = connection
+
+    def __enter__(self) -> INewsConnection:
+        return self.connection
+
+    def __exit__(self, exc_type, exc, tb):
+        self.pool.release(self.connection)
+        return False
+
+
+class INewsConnectionPool:
+    """Pool compartido para limitar sesiones FTP y repartirlas entre hosts."""
+
+    def __init__(
+        self,
+        hosts: List[str],
+        user: str,
+        password: str,
+        max_total: int = 4,
+        max_per_host: int = 2,
+        idle_ttl_seconds: int = 60,
+        acquire_timeout_seconds: int = 20,
+        logger: Optional[logging.Logger] = None
+    ):
+        self.hosts = [h for h in hosts if h]
+        if not self.hosts:
+            raise ValueError("No hay hosts FTP configurados para iNews")
+
+        self.user = user
+        self.password = password
+        self.max_total = max(1, int(max_total))
+        self.max_per_host = max(1, int(max_per_host))
+        self.idle_ttl_seconds = max(5, int(idle_ttl_seconds))
+        self.acquire_timeout_seconds = max(1, int(acquire_timeout_seconds))
+        self.logger = logger or logging.getLogger(self.__class__.__name__)
+
+        self._condition = threading.Condition()
+        self._available: Dict[str, List[INewsConnection]] = {host: [] for host in self.hosts}
+        self._in_use: Dict[str, int] = {host: 0 for host in self.hosts}
+        self._open_count: Dict[str, int] = {host: 0 for host in self.hosts}
+        self._next_host_index = 0
+
+    def choose_host(self, key: str) -> str:
+        if len(self.hosts) == 1:
+            return self.hosts[0]
+        index = zlib.crc32((key or "").encode("utf-8")) % len(self.hosts)
+        return self.hosts[index]
+
+    def next_host(self) -> str:
+        with self._condition:
+            host = self.hosts[self._next_host_index % len(self.hosts)]
+            self._next_host_index += 1
+            return host
+
+    def acquire(self, preferred_host: Optional[str] = None) -> INewsConnectionLease:
+        host = preferred_host if preferred_host in self._available else self.hosts[0]
+        deadline = time.time() + self.acquire_timeout_seconds
+
+        with self._condition:
+            while True:
+                self._close_idle_locked()
+
+                if self._available[host]:
+                    connection = self._available[host].pop()
+                    self._in_use[host] += 1
+                    return INewsConnectionLease(self, connection)
+
+                total_open = sum(self._open_count.values())
+                if total_open < self.max_total and self._open_count[host] < self.max_per_host:
+                    self._open_count[host] += 1
+                    self._in_use[host] += 1
+                    return INewsConnectionLease(self, INewsConnection(host, self.user, self.password))
+
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError(f"No hay conexiones FTP disponibles para {host}")
+                self._condition.wait(timeout=min(remaining, 1.0))
+
+    def release(self, connection: INewsConnection):
+        connection.mark_used()
+        with self._condition:
+            host = connection.host
+            self._in_use[host] = max(0, self._in_use.get(host, 0) - 1)
+            self._available.setdefault(host, []).append(connection)
+            self._condition.notify_all()
+
+    def _close_idle_locked(self):
+        now = time.time()
+        for host, connections in self._available.items():
+            kept = []
+            for connection in connections:
+                if now - connection.last_used >= self.idle_ttl_seconds:
+                    connection.disconnect()
+                    self._open_count[host] = max(0, self._open_count.get(host, 0) - 1)
+                else:
+                    kept.append(connection)
+            self._available[host] = kept
+
+    def close_idle_connections(self):
+        with self._condition:
+            self._close_idle_locked()
+
+    def shutdown(self):
+        with self._condition:
+            for host, connections in self._available.items():
+                for connection in connections:
+                    connection.disconnect()
+                self._available[host] = []
+                self._open_count[host] = self._in_use.get(host, 0)
+            self._condition.notify_all()
 
 
 class Rotulo:
@@ -1111,11 +1289,24 @@ class RundownWatcher:
     Gestiona el estado y monitoreo de UN minutado específico.
     Cada watcher tiene su propia conexión FTP para permitir procesamiento en paralelo.
     """
-    def __init__(self, name: str, config: Dict, inews_config: Dict):
+    def __init__(self, name: str, config: Dict, inews_config: Dict, ftp_pool: INewsConnectionPool):
         self.name = name
         self.path = config.get("rundown_path")
-        self.interval = config.get("interval_seconds", 30)
+        self.base_interval = max(1, int(config.get("interval_seconds", 30)))
+        self.interval = self.base_interval
         self.ap_filter = config.get("ap_filter", "")
+        self.ftp_pool = ftp_pool
+        self.assigned_host = (
+            config.get("assigned_inews_host")
+            or config.get("inews_host")
+            or config.get("host")
+            or ftp_pool.choose_host(f"{name}:{self.path}")
+        )
+        self.metadata_cache_enabled = bool(config.get("metadata_cache", True))
+        self.story_cache: Dict[str, Dict[str, Any]] = {}
+        self.idle_runs = 0
+        self.adaptive_polling = bool(config.get("adaptive_polling", True))
+        self.max_interval = max(self.base_interval, int(config.get("max_interval_seconds", self.base_interval * 3)))
         raw_debug = config.get("debug_parser")
         if raw_debug is None:
             raw_debug = os.getenv("INEWS_DEBUG_PARSER", "0")
@@ -1125,18 +1316,13 @@ class RundownWatcher:
             self.debug_parser = bool(raw_debug)
         
         # Cada watcher tiene su propia conexión FTP independiente
-        self.connection = INewsConnection(
-            host=inews_config["host"],
-            user=inews_config["user"],
-            password=inews_config["password"]
-        )
-        
         self.last_run_time = 0
         self.last_entries: Dict[str, str] = {}  # entry_name -> hash
         self.active_urls: List[str] = [] # URLs encontradas en la última pasada exitosa
         self.has_run = False # Indica si el watcher ha completado al menos una ejecución
         self.logger = logging.getLogger(f"Watcher_{name}")
         self._lock = threading.Lock()  # Protege acceso concurrente al estado del watcher
+        self.logger.info(f"Watcher {self.name} asignado a iNews FTP {self.assigned_host}")
 
     def is_due(self) -> bool:
         """Verifica si es hora de ejecutar este monitor."""
@@ -1144,9 +1330,17 @@ class RundownWatcher:
 
     def disconnect(self):
         """Cierra la conexión FTP de este watcher."""
-        self.connection.disconnect()
+        return
 
     def process(self) -> List[Dict]:
+        try:
+            with self.ftp_pool.acquire(self.assigned_host) as connection:
+                return self._process_with_connection(connection)
+        except TimeoutError as e:
+            self.logger.error(f"No se pudo obtener conexiÃ³n FTP para {self.name}: {e}")
+            return []
+
+    def _process_with_connection(self, connection: INewsConnection) -> List[Dict]:
         """
         Ejecuta la revisión de este minutado.
         Retorna la lista de entradas filtradas (nuevas/modificadas).
@@ -1158,19 +1352,21 @@ class RundownWatcher:
         self.last_run_time = time.time()
         
         # Asegurar conexión y navegar al directorio correcto
-        if not self.connection.ensure_connected():
+        if not connection.ensure_connected():
             self.logger.error(f"No se pudo conectar a iNews para {self.name}")
             return []
         
-        if not self.connection.navigate_to(self.path):
+        if not connection.navigate_to(self.path):
             self.logger.error(f"Fallo navegando a {self.path}")
             return []
         
-        story_names = self.connection.list_story_names(self.path)
+        story_names = connection.list_story_names(self.path)
         if not story_names:
             self.logger.warning(f"No se encontraron stories o error al listar {self.path}")
             # Si falla, no limpiamos active_urls para evitar borrar contenido por error de red
             return []
+
+        directory_metadata = connection.list_story_metadata(self.path) if self.metadata_cache_enabled else {}
         
         if self.debug_parser:
             preview = ", ".join(story_names[:15])
@@ -1183,6 +1379,7 @@ class RundownWatcher:
         current_urls = []
         scanned_count = 0
         matched_count = 0
+        valid_story_names = set()
         
         # Nombres especiales de iNews que no son stories válidas
         INVALID_STORY_NAMES = {'ibc', 'data', 'metadata', 'locator', 'info'}
@@ -1226,17 +1423,35 @@ class RundownWatcher:
             # Filtrar entradas que no son stories válidas
             if not is_valid_story_name(entry_name):
                 continue
+            valid_story_names.add(entry_name)
+
+            metadata = directory_metadata.get(entry_name)
+            if self.metadata_cache_enabled and not metadata:
+                metadata = connection.get_story_metadata(entry_name)
+            cached = self.story_cache.get(entry_name)
+            if metadata and cached and cached.get("metadata") == metadata:
+                if cached.get("matched"):
+                    matched_count += 1
+                    current_urls.extend(cached.get("urls", []))
+                continue
             
-            content = self.connection.read_story(entry_name)
+            content = connection.read_story(entry_name)
             if not content:
                 continue
             
             # Filtros
             if not StoryParser.matches_ap_filter(content, self.ap_filter):
+                if metadata:
+                    self.story_cache[entry_name] = {
+                        "metadata": metadata,
+                        "matched": False,
+                        "urls": []
+                    }
                 continue
             matched_count += 1
                 
             story_info = StoryParser.extract_story_info(content)
+            story_urls = story_info.get('urls', [])
             if self.debug_parser:
                 urls = story_info.get("urls", [])
                 preview = ", ".join(urls[:6]) if urls else "-"
@@ -1248,7 +1463,7 @@ class RundownWatcher:
                 )
             
             # Recolectar URLs (de todas las historias válidas)
-            current_urls.extend(story_info.get('urls', []))
+            current_urls.extend(story_urls)
             
             # Detectar cambios
             content_hash = hash(content)
@@ -1266,15 +1481,45 @@ class RundownWatcher:
                 }
                 filtered_results.append(result)
 
+            if metadata:
+                self.story_cache[entry_name] = {
+                    "metadata": metadata,
+                    "matched": True,
+                    "urls": story_urls,
+                    "content_hash": content_hash
+                }
+
         if self.debug_parser:
             self.logger.info(
                 f"[DEBUG_PARSER] resumen stories_escaneadas={scanned_count} "
                 f"stories_con_match={matched_count} urls_totales={len(current_urls)}"
             )
         
+        self.story_cache = {
+            name: cached
+            for name, cached in self.story_cache.items()
+            if name in valid_story_names
+        }
         self.active_urls = current_urls
         self.has_run = True
+        self._update_adaptive_interval(len(filtered_results))
         return filtered_results
+
+    def _update_adaptive_interval(self, changes_count: int):
+        if not self.adaptive_polling:
+            return
+
+        if changes_count > 0:
+            if self.interval != self.base_interval:
+                self.logger.info(f"Actividad detectada en {self.name}; intervalo restaurado a {self.base_interval}s")
+            self.interval = self.base_interval
+            self.idle_runs = 0
+            return
+
+        self.idle_runs += 1
+        if self.idle_runs >= 3 and self.interval < self.max_interval:
+            self.interval = min(self.max_interval, self.interval * 2)
+            self.logger.info(f"Sin cambios en {self.name}; intervalo adaptativo sube a {self.interval}s")
 
 
 class ProfileRunner:
@@ -1285,7 +1530,8 @@ class ProfileRunner:
     """
     
     def __init__(self, profile_name: str, profile_config: Dict, inews_config: Dict, 
-                 scripts_twitter_path: str, logger: logging.Logger):
+                 scripts_twitter_path: str, logger: logging.Logger,
+                 ftp_pool: INewsConnectionPool):
         self.profile_name = profile_name
         self.display_name = profile_config.get("name", profile_name)
         self.profile_config = profile_config
@@ -1299,6 +1545,8 @@ class ProfileRunner:
         
         # Paralelismo configurable por perfil
         self.max_workers = profile_config.get("monitor", {}).get("max_workers", 5)
+        self.stagger_seconds = float(profile_config.get("monitor", {}).get("stagger_seconds", 0.5))
+        self.ftp_pool = ftp_pool
         
         # ContentManager independiente para este perfil
         self.content_manager = ContentManager(
@@ -1339,10 +1587,12 @@ class ProfileRunner:
                 merged_conf["ap_filter"] = ap_filter
             if "debug_parser" not in merged_conf:
                 merged_conf["debug_parser"] = self.profile_config.get("monitor", {}).get("debug_parser", False)
+            if "inews_host" not in merged_conf and "host" not in merged_conf and self.ftp_pool.hosts:
+                merged_conf["assigned_inews_host"] = self.ftp_pool.next_host()
             
             # Nombre del watcher incluye el perfil para distinguir en logs
             watcher_name = f"{self.profile_name}/{name}"
-            self.watchers.append(RundownWatcher(watcher_name, merged_conf, self.inews_config))
+            self.watchers.append(RundownWatcher(watcher_name, merged_conf, self.inews_config, self.ftp_pool))
             active_count += 1
         
         self.logger.info(
@@ -1383,10 +1633,11 @@ class ProfileRunner:
         effective_workers = min(self.max_workers, len(due_watchers))
         
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            future_to_watcher = {
-                executor.submit(self._process_watcher, w): w
-                for w in due_watchers
-            }
+            future_to_watcher = {}
+            for idx, watcher in enumerate(due_watchers):
+                if idx > 0 and self.stagger_seconds > 0:
+                    time.sleep(self.stagger_seconds)
+                future_to_watcher[executor.submit(self._process_watcher, watcher)] = watcher
             
             for future in as_completed(future_to_watcher):
                 watcher = future_to_watcher[future]
@@ -1476,8 +1727,9 @@ class INewsMonitor:
         self.logger = logging.getLogger(self.__class__.__name__)
 
         self.scripts_twitter_path = self._resolve_scripts_twitter_path(self.config)
+        self.ftp_pool = self._build_ftp_pool(self.config)
         self.profile_runners: List[ProfileRunner] = self._build_profile_runners(
-            self.config, self.scripts_twitter_path
+            self.config, self.scripts_twitter_path, self.ftp_pool
         )
         self._capture_runtime_fingerprints()
 
@@ -1513,6 +1765,46 @@ class INewsMonitor:
             profiles_dir = os.path.join(base_dir, profiles_dir)
         return profiles_dir
 
+    def _build_ftp_pool(self, config: Dict) -> INewsConnectionPool:
+        inews_config = config.get("inews", {})
+        raw_hosts = inews_config.get("hosts")
+        if isinstance(raw_hosts, str):
+            hosts = [raw_hosts]
+        elif isinstance(raw_hosts, list):
+            hosts = [str(host).strip() for host in raw_hosts if str(host).strip()]
+        else:
+            hosts = []
+
+        legacy_host = str(inews_config.get("host", "")).strip()
+        secondary_host = str(inews_config.get("secondary_host", "")).strip()
+        for host in (legacy_host, secondary_host):
+            if host and host not in hosts:
+                hosts.append(host)
+
+        user = inews_config.get("user", "")
+        password = inews_config.get("password", "")
+        max_total = int(inews_config.get("max_connections_total", inews_config.get("max_ftp_connections_total", 4)))
+        default_per_host = 2 if len(hosts) > 1 else max_total
+        max_per_host = int(inews_config.get("max_connections_per_host", default_per_host))
+        idle_ttl = int(inews_config.get("idle_ttl_seconds", 60))
+        acquire_timeout = int(inews_config.get("acquire_timeout_seconds", 20))
+
+        pool = INewsConnectionPool(
+            hosts=hosts,
+            user=user,
+            password=password,
+            max_total=max_total,
+            max_per_host=max_per_host,
+            idle_ttl_seconds=idle_ttl,
+            acquire_timeout_seconds=acquire_timeout,
+            logger=self.logger
+        )
+        self.logger.info(
+            f"Pool FTP iNews: hosts={hosts}, max_total={pool.max_total}, "
+            f"max_por_host={pool.max_per_host}, ttl_idle={pool.idle_ttl_seconds}s"
+        )
+        return pool
+
     @staticmethod
     def _get_mtime(path: str) -> Optional[float]:
         try:
@@ -1540,7 +1832,12 @@ class INewsMonitor:
             root.addHandler(file_handler)
             root.addHandler(console_handler)
     
-    def _build_profile_runners(self, config: Dict, scripts_twitter_path: str) -> List[ProfileRunner]:
+    def _build_profile_runners(
+        self,
+        config: Dict,
+        scripts_twitter_path: str,
+        ftp_pool: INewsConnectionPool
+    ) -> List[ProfileRunner]:
         """Construye los runners a partir de la configuración actual en disco."""
         active_names = config.get("active_profiles", [])
         profiles_dir = self._resolve_profiles_dir(config)
@@ -1560,7 +1857,7 @@ class INewsMonitor:
             self.logger.info("Modo legacy: usando monitors de config.json directamente")
             runner = ProfileRunner(
                 "LEGACY", config, inews_config,
-                scripts_twitter_path, self.logger
+                scripts_twitter_path, self.logger, ftp_pool
             )
             runners.append(runner)
             return runners
@@ -1578,7 +1875,7 @@ class INewsMonitor:
 
                 runner = ProfileRunner(
                     profile_name, profile_config, inews_config,
-                    scripts_twitter_path, self.logger
+                    scripts_twitter_path, self.logger, ftp_pool
                 )
                 runners.append(runner)
                 self.logger.info(f"Perfil cargado: {profile_name} ({runner.display_name})")
@@ -1637,11 +1934,14 @@ class INewsMonitor:
             return
 
         new_scripts_path = self._resolve_scripts_twitter_path(new_config)
-        new_runners = self._build_profile_runners(new_config, new_scripts_path)
+        new_ftp_pool = self._build_ftp_pool(new_config)
+        new_runners = self._build_profile_runners(new_config, new_scripts_path, new_ftp_pool)
         old_runners = self.profile_runners
+        old_ftp_pool = self.ftp_pool
 
         self.config = new_config
         self.scripts_twitter_path = new_scripts_path
+        self.ftp_pool = new_ftp_pool
         self.profile_runners = new_runners
         self._capture_runtime_fingerprints()
 
@@ -1650,6 +1950,10 @@ class INewsMonitor:
                 runner.disconnect_all()
             except Exception:
                 pass
+        try:
+            old_ftp_pool.shutdown()
+        except Exception:
+            pass
 
         profile_names = [r.display_name for r in self.profile_runners]
         self.logger.info(
@@ -1669,12 +1973,14 @@ class INewsMonitor:
                     all_results.extend(results)
             except Exception as e:
                 self.logger.error(f"Error en perfil {runner.profile_name}: {e}", exc_info=True)
+        self.ftp_pool.close_idle_connections()
         return all_results
     
     def _disconnect_all(self):
         """Desconecta todas las conexiones de todos los perfiles."""
         for runner in self.profile_runners:
             runner.disconnect_all()
+        self.ftp_pool.shutdown()
 
     def stop(self):
         """Solicita parada limpia del monitor."""
